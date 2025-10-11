@@ -43,9 +43,8 @@ Welcome to **Stock Price Prediction**! This repository contains code and resourc
    - Or run Python scripts from `src/`
 
 ## 📊 Example Results
-
 <img width="719" height="590" alt="image" src="https://github.com/user-attachments/assets/8138bda6-e132-4dc0-9ec7-d0475400392d" />
-**Happy predicting!**
+
 ## Basic usage - predict META stock
 python Stock_Price_Prediction_Model.py META
 
@@ -65,3 +64,5 @@ python Stock_Price_Prediction_Model.py META --skip-plots
 
 ## Custom output directory
 python Stock_Price_Prediction_Model.py META --output-dir my_analysis
+
+**Happy predicting!**
