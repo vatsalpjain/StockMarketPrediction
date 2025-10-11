@@ -49,9 +49,9 @@ Welcome to **Stock Price Prediction**! This repository contains code and resourc
 python Stock_Price_Prediction_Model.py AAPL
 
 ## Predict different stocks
-python Stock_Price_Prediction_Model.py AAPL\n
-python Stock_Price_Prediction_Model.py TSLA\n
-python Stock_Price_Prediction_Model.py GOOGL\n
+python Stock_Price_Prediction_Model.py AAPL
+python Stock_Price_Prediction_Model.py TSLA
+python Stock_Price_Prediction_Model.py GOOGL
 
 ## Use different model
 python Stock_Price_Prediction_Model.py META --model ridge
