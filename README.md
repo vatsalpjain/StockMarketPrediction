@@ -6,7 +6,7 @@ Welcome to **Stock Price Prediction**! This repository contains code and resourc
 
 - Clean and modular code for stock price prediction
 - Data preprocessing and visualization
-- Multiple machine learning models (e.g., Linear Regression, LSTM)
+- Multiple machine learning models (e.g., XgBoost,Ridge)
 - Easy to customize for different stocks
 - Example datasets and notebook walkthroughs
 
