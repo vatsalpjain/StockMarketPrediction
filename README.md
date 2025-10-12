@@ -47,6 +47,9 @@ old version
 <img width="719" height="590" alt="image" src="https://github.com/user-attachments/assets/8138bda6-e132-4dc0-9ec7-d0475400392d" />
 
 new version
+<img width="913" height="990" alt="image" src="https://github.com/user-attachments/assets/7c0d9c72-884f-4b0f-ae5f-a27f1cb03621" />
+<img width="907" height="946" alt="image" src="https://github.com/user-attachments/assets/2d0858c2-c175-40a5-8c7c-909941145635" />
+<img width="909" height="340" alt="image" src="https://github.com/user-attachments/assets/ee057255-4711-4817-8c5e-22bd8c4bcfdc" />
 
 
 
