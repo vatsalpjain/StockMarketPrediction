@@ -4,29 +4,179 @@ __pycache__/
 *.pyo
 *.pyd
 *.swp
+*.py[cod]
+*$py.class
 
 # Virtual environments
 .venv/
 env/
 venv/
+ENV/
+env.bak/
+venv.bak/
 
-# Jupyter Notebook checkpoints
+# Jupyter Notebook
 .ipynb_checkpoints/
+*.ipynb_checkpoints
 
 # Environment variables
 .env
+.env.local
+.env.*.local
 
 # Output and cache folders
 output/
 cache/
+*.pkl
+*.pickle
+
+# Model files
+*.h5
+*.hdf5
+*.joblib
+*.model
+
+# Data files (if you don't want to track downloaded data)
+data/
+*.csv
+*.json
+*.parquet
+
+# Plots and visualizations
+plots/
+*.png
+*.jpg
+*.jpeg
+*.svg
+*.pdf
+
+# Reports (optional - remove if you want to track them)
+analysis_summary.txt
+analysis_summary.json
 
 # OS files
 .DS_Store
 Thumbs.db
+desktop.ini
 
 # Logs
 *.log
+logs/
+*.out
 
 # IDE files
 .vscode/
 .idea/
+*.sublime-project
+*.sublime-workspace
+.spyderproject
+.spyproject
+.ropeproject
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Unit test / coverage
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+cover/
+
+# Translations
+*.mo
+*.pot
+
+# Scrapy
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+docs/_static/
+docs/_templates/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# pdm
+.pdm.toml
+
+# PEP 582
+__pypackages__/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath
+*.sage.py
+
+# Spyder
+.spyderproject
+.spyproject
+
+# mkdocs
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre
+.pyre/
+
+# pytype
+.pytype/
+
+# Cython
+cython_debug/
+
+# API Keys (extra safety)
+*api_key*
+*secret*
+config_local.py
+credentials.json

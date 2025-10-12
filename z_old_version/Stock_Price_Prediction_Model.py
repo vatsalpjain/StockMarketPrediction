@@ -124,56 +124,170 @@ class StockPredictionPipeline:
         print("Indicators calculated successfully")
 
     def fetch_and_analyze_sentiment(self):
-        """Fetch news sentiment from Marketaux API"""
+        """Fetch news sentiment from Marketaux, Finnhub, and Alpha Vantage APIs"""
         import requests
         from dotenv import load_dotenv
+        import finnhub
         
         load_dotenv()
         
-        MARKETAUX_API_KEY = os.getenv("MARKETAUX_API_KEY")
-        if not MARKETAUX_API_KEY:
-            print("Marketaux API key not found in environment variables.")
-            self.df['Sentiment_Score'] = 0.0
-            self.sentiment_info = {'average_score': 0.0}
-            return
-        print(f"Fetching sentiment from Marketaux for {self.ticker_symbol}...")
+        sentiment_scores = []
+        sources = []
+        detailed_info = {}
         
-        try:
-            url = f"https://api.marketaux.com/v1/news/all?symbols={self.ticker_symbol}&filter_entities=true&language=en&api_token={MARKETAUX_API_KEY}"
-            
-            response = requests.get(url)
-            data = response.json()
-            
-            if 'data' in data and len(data['data']) > 0:
-                # Extract sentiment scores from articles
-                sentiment_scores = []
+        # Marketaux API
+        MARKETAUX_API_KEY = os.getenv("MARKETAUX_API_KEY")
+        marketaux_sentiment = None
+        
+        if MARKETAUX_API_KEY:
+            print(f"Fetching sentiment from Marketaux for {self.ticker_symbol}...")
+            try:
+                url = f"https://api.marketaux.com/v1/news/all?symbols={self.ticker_symbol}&filter_entities=true&language=en&api_token={MARKETAUX_API_KEY}"
+                response = requests.get(url, timeout=10)
+                data = response.json()
                 
-                for article in data['data'][:10]:  # Top 10 articles
-                    if 'entities' in article:
-                        for entity in article['entities']:
-                            if entity['symbol'] == self.ticker_symbol and 'sentiment_score' in entity:
-                                sentiment_scores.append(entity['sentiment_score'])
-                
-                if sentiment_scores:
-                    avg_sentiment = sum(sentiment_scores) / len(sentiment_scores)
-                    print(f"✓ Average Sentiment: {avg_sentiment:.3f} from {len(sentiment_scores)} articles")
+                if 'data' in data and len(data['data']) > 0:
+                    article_sentiments = []
+                    for article in data['data'][:10]:
+                        if 'entities' in article:
+                            for entity in article['entities']:
+                                if entity['symbol'] == self.ticker_symbol and 'sentiment_score' in entity:
+                                    article_sentiments.append(entity['sentiment_score'])
                     
-                    self.df['Sentiment_Score'] = avg_sentiment
-                    self.sentiment_info = {
-                        'average_score': float(avg_sentiment),
-                        'num_articles': len(sentiment_scores),
-                        'source': 'Marketaux API'
+                    if article_sentiments:
+                        marketaux_sentiment = sum(article_sentiments) / len(article_sentiments)
+                        sentiment_scores.append(marketaux_sentiment)
+                        sources.append('Marketaux')
+                        detailed_info['marketaux'] = {
+                            'score': float(marketaux_sentiment),
+                            'num_articles': len(article_sentiments)
+                        }
+                        print(f"✓ Marketaux Sentiment: {marketaux_sentiment:.3f} from {len(article_sentiments)} articles")
+            except Exception as e:
+                print(f"Marketaux Error: {e}")
+        else:
+            print("Marketaux API key not found in environment variables.")
+        
+        # Finnhub API
+        FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY")
+        finnhub_sentiment = None
+        
+        if FINNHUB_API_KEY:
+            print(f"Fetching sentiment from Finnhub for {self.ticker_symbol}...")
+            try:
+                finnhub_client = finnhub.Client(api_key=FINNHUB_API_KEY)
+                sentiment_data = finnhub_client.news_sentiment(self.ticker_symbol)
+                
+                if sentiment_data and 'sentiment' in sentiment_data:
+                    finnhub_sentiment = (sentiment_data['sentiment']['bullishPercent'] - sentiment_data['sentiment']['bearishPercent']) / 100
+                    sentiment_scores.append(finnhub_sentiment)
+                    sources.append('Finnhub')
+                    detailed_info['finnhub'] = {
+                        'score': float(finnhub_sentiment),
+                        'bullish_percent': sentiment_data['sentiment']['bullishPercent'],
+                        'bearish_percent': sentiment_data['sentiment']['bearishPercent']
                     }
-                else:
-                    self.df['Sentiment_Score'] = 0.0
-                    self.sentiment_info = {'average_score': 0.0}
+                    print(f"✓ Finnhub Sentiment: {finnhub_sentiment:.3f}")
+                    print(f"  Bullish: {sentiment_data['sentiment']['bullishPercent']:.1f}%")
+                    print(f"  Bearish: {sentiment_data['sentiment']['bearishPercent']:.1f}%")
+            except Exception as e:
+                print(f"Finnhub Error: {e}")
+        else:
+            print("Finnhub API key not found in environment variables.")
+        
+        # Alpha Vantage API
+        ALPHA_VANTAGE_API_KEY = os.getenv("ALPHA_VANTAGE_API_KEY")
+        alpha_vantage_sentiment = None
+        
+        if ALPHA_VANTAGE_API_KEY:
+            print(f"Fetching sentiment from Alpha Vantage for {self.ticker_symbol}...")
+            try:
+                url = f"https://www.alphavantage.co/query?function=NEWS_SENTIMENT&tickers={self.ticker_symbol}&apikey={ALPHA_VANTAGE_API_KEY}"
+                response = requests.get(url, timeout=10)
+                data = response.json()
+                
+                if 'Error Message' in data:
+                    print(f"⚠ Alpha Vantage API Error: {data['Error Message']}")
+                elif 'Note' in data:
+                    print(f"⚠ Alpha Vantage API Limit: {data['Note']} (Free tier: 25 calls/day)")
+                elif 'feed' in data and len(data['feed']) > 0:
+                    av_sentiment_scores = []
+                    
+                    for article in data['feed'][:10]:
+                        ticker_sentiments = article.get('ticker_sentiment', [])
+                        ticker_score = None
+                        
+                        for ticker_sent in ticker_sentiments:
+                            if ticker_sent.get('ticker') == self.ticker_symbol:
+                                ticker_score = float(ticker_sent.get('ticker_sentiment_score', 0))
+                                break
+                        
+                        if ticker_score is None:
+                            ticker_score = float(article.get('overall_sentiment_score', 0))
+                        
+                        av_sentiment_scores.append(ticker_score)
+                    
+                    if av_sentiment_scores:
+                        alpha_vantage_sentiment = sum(av_sentiment_scores) / len(av_sentiment_scores)
+                        sentiment_scores.append(alpha_vantage_sentiment)
+                        sources.append('Alpha Vantage')
+                        
+                        # Determine overall label
+                        if alpha_vantage_sentiment >= 0.15:
+                            av_label = "BULLISH 📈"
+                        elif alpha_vantage_sentiment <= -0.15:
+                            av_label = "BEARISH 📉"
+                        else:
+                            av_label = "NEUTRAL ➖"
+                        
+                        detailed_info['alpha_vantage'] = {
+                            'score': float(alpha_vantage_sentiment),
+                            'num_articles': len(av_sentiment_scores),
+                            'label': av_label
+                        }
+                        print(f"✓ Alpha Vantage Sentiment: {alpha_vantage_sentiment:.3f} ({av_label}) from {len(av_sentiment_scores)} articles")
+            except Exception as e:
+                print(f"Alpha Vantage Error: {e}")
+        else:
+            print("Alpha Vantage API key not found in environment variables.")
+        
+        # Calculate combined sentiment
+        if sentiment_scores:
+            combined_sentiment = sum(sentiment_scores) / len(sentiment_scores)
             
-        except Exception as e:
-            print(f"Error: {e}")
+            # Determine combined label
+            if combined_sentiment >= 0.15:
+                combined_label = "BULLISH 📈"
+            elif combined_sentiment <= -0.15:
+                combined_label = "BEARISH 📉"
+            else:
+                combined_label = "NEUTRAL ➖"
+            
+            print(f"\n{'='*60}")
+            print(f"✓ COMBINED SENTIMENT: {combined_sentiment:.3f} ({combined_label})")
+            print(f"  Sources: {', '.join(sources)} ({len(sources)} APIs)")
+            print(f"{'='*60}\n")
+            
+            self.df['Sentiment_Score'] = combined_sentiment
+            self.sentiment_info = {
+                'average_score': float(combined_sentiment),
+                'label': combined_label,
+                'sources': sources,
+                'num_sources': len(sources),
+                'detailed_scores': detailed_info
+            }
+        else:
+            print("\n⚠ No sentiment data available from any API")
+            print("Using neutral sentiment (0.0)\n")
             self.df['Sentiment_Score'] = 0.0
-            self.sentiment_info = {'average_score': 0.0}
+            self.sentiment_info = {
+                'average_score': 0.0,
+                'label': 'NEUTRAL ➖',
+                'sources': [],
+                'num_sources': 0
+            }
 
- 
+
     def train_model(self, model_type='xgboost'):
         """Train prediction model with caching"""
         
@@ -439,7 +553,7 @@ class StockPredictionPipeline:
                     
                     prediction_error = abs(actual_price - last_pred_value)
                     error_percentage = (prediction_error / actual_price) * 100
-                    print(f"Prediction error: ${prediction_error:.2f} ({error_percentage:.1f}%)")
+                    print(f"Prediction error: ${prediction_error:.2f} ({prediction_error:.1f}%)")
                 
                 prediction_coverage = (self.df['Predicted_Close'].notna().sum() / len(self.df)) * 100
                 print(f"Prediction coverage: {prediction_coverage:.1f}% of total data points")
@@ -475,10 +589,13 @@ class StockPredictionPipeline:
             print(f"20-day HMA: ${hma_current:.2f} ({'Above' if close_current > hma_current else 'Below'} HMA)")
             print(f"RSI (14): {rsi_current:.1f} ({'Overbought' if rsi_current > 70 else 'Oversold' if rsi_current < 30 else 'Neutral'})")
             print(f"MACD Signal: {summary['macd_signal']}")
-            if hasattr(self, 'sentiment_info'):
+            if hasattr(self, 'sentiment_info') and self.sentiment_info['num_sources'] > 0:
                 sent_score = self.sentiment_info['average_score']
-                sent_label = 'Positive' if sent_score >= 0.05 else 'Negative' if sent_score <= -0.05 else 'Neutral'
-                print(f"News Sentiment: {sent_label} (Score: {sent_score:.3f}, Articles: {self.sentiment_info['num_articles']})")
+                sent_label = self.sentiment_info.get('label', 'NEUTRAL ➖')
+                num_sources = self.sentiment_info['num_sources']
+                sources_str = ', '.join(self.sentiment_info['sources'])
+                print(f"News Sentiment: {sent_label} (Score: {sent_score:.3f})")
+                print(f"  Combined from {num_sources} source(s): {sources_str}")
             
             # Save summary to JSON
             summary_file = self.output_dir / "analysis_summary.json"
