@@ -47,9 +47,7 @@ old version
 <img width="719" height="590" alt="image" src="https://github.com/user-attachments/assets/8138bda6-e132-4dc0-9ec7-d0475400392d" />
 
 new version
-![alt text](image-1.png)
-![alt text](image-2.png)
-![alt text](image-3.png)
+
 
 
 
