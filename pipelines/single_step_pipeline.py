@@ -33,7 +33,7 @@ class SingleStepPipeline:
     
     def download_data(self, period=DEFAULT_PERIOD):
         """Step 1: Download stock data"""
-        fetcher = StockDataFetcher(self.ticker, self.cache_manager, self.force_refresh)
+        fetcher = StockDataFetcher(self.ticker)
         self.df = fetcher.fetch(period)
     
     def calculate_indicators(self):
@@ -57,11 +57,11 @@ class SingleStepPipeline:
         """Step 4: Train prediction model"""
         
         # Check cache
-        data_hash = self.cache_manager._get_data_hash(self.df)
+        import hashlib
+        data_hash = hashlib.md5(pd.util.hash_pandas_object(self.df, index=True).values).hexdigest()
         cached_model = self.cache_manager.load_model(self.ticker, model_type)
         
-        if not self.force_refresh and cached_model and \
-           self.cache_manager.is_cache_valid(cached_model, data_hash):
+        if not self.force_refresh and self.cache_manager.is_cache_valid(cached_model, data_hash):
             print(f"✓ Loaded cached model for {self.ticker}")
             self.model = cached_model['model']
             self.metrics = cached_model['metrics']

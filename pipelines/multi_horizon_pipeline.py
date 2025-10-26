@@ -255,11 +255,20 @@ class MultiHorizonPipeline(SingleStepPipeline):
         plots_dir = self.output_dir / "plots"
         plots_dir.mkdir(exist_ok=True)
         
-        print("Creating multi-horizon prediction plot...")
         plotter = PricePlotter(self.df, self.ticker)
+        
+        # Multi-horizon prediction overlay
+        print("Creating multi-horizon prediction plot...")
         filepath = plots_dir / "multi_horizon_predictions.png"
         plotter.plot_multi_horizon_predictions(filepath, self.backtest_predictions)
         print(f"✓ Saved: {filepath}")
+        
+        # Detailed backtest comparison
+        if self.backtest_predictions:
+            print("Creating backtest comparison plot...")
+            filepath = plots_dir / "backtest_comparison.png"
+            plotter.plot_backtest_comparison(filepath, self.backtest_predictions)
+            print(f"✓ Saved: {filepath}")
     
     def backtest_multihorizon(self, n_splits=5):
         """Backtest multi-horizon predictions using walk-forward validation"""
@@ -348,7 +357,7 @@ class MultiHorizonPipeline(SingleStepPipeline):
             self.df, 
             self.ticker, 
             self.output_dir,
-            self.multi_metrics.get('1d', self.metrics),  # Use 1-day metrics or fallback
+            self.multi_metrics,  # Pass all horizon metrics
             self.sentiment_info,
             detailed_predictions
         )

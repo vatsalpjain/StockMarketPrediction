@@ -12,11 +12,11 @@ class XGBoostModel(BaseStockModel):
     
     def get_param_grid(self):
         return {
-            'n_estimators': [100, 200, 300],
-            'max_depth': [3, 5, 7],
-            'learning_rate': [0.01, 0.05, 0.1],
-            'subsample': [0.8, 0.9, 1.0],
-            'colsample_bytree': [0.8, 0.9, 1.0],
+            'n_estimators': [100, 200],
+            'max_depth': [3, 5],
+            'learning_rate': [0.01, 0.1],
+            'subsample': [0.8, 1.0],
+            'colsample_bytree': [0.8, 1.0],
             'reg_alpha': [0, 0.1, 1],
             'reg_lambda': [1, 10, 100]
         }

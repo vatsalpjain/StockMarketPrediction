@@ -140,55 +140,91 @@ class ReportGenerator:
         
         # Multi-Horizon Predictions
         if self.predictions:
-            summary_lines.append("\n🎯 MULTI-HORIZON PREDICTIONS")
+            summary_lines.append("\n🎯 MULTI-HORIZON PREDICTIONS & BACKTEST RESULTS")
             summary_lines.append("-"*80)
             
             for horizon, pred_data in sorted(self.predictions.items(), key=lambda x: int(x[0].replace('d', ''))):
                 horizon_days = int(horizon.replace('d', ''))
-                pred_date = pred_data.get('date', 'N/A')
-                pred_price = pred_data.get('predicted_price', 0)
-                actual_price = pred_data.get('actual_price')
-                confidence = pred_data.get('confidence_interval', {})
                 
-                summary_lines.append(f"\n{horizon_days}-Day Forecast:")
-                summary_lines.append(f"  Target Date: {pred_date}")
-                summary_lines.append(f"  Predicted Price: ${pred_price:.2f}")
+                summary_lines.append(f"\n{horizon_days}-Day Ahead Model:")
                 
-                if confidence:
-                    summary_lines.append(f"  Confidence Interval (95%): ${confidence.get('lower', 0):.2f} - ${confidence.get('upper', 0):.2f}")
-                
-                if actual_price:
-                    error = abs(actual_price - pred_price)
-                    error_pct = (error / actual_price) * 100
-                    summary_lines.append(f"  Actual Price: ${actual_price:.2f}")
-                    summary_lines.append(f"  Prediction Error: ${error:.2f} ({error_pct:.2f}%)")
+                # Backtest performance (historical accuracy)
+                if 'actual_price' in pred_data:
+                    summary_lines.append(f"  📊 BACKTEST RESULTS:")
+                    summary_lines.append(f"     Test Date: {pred_data.get('date', 'N/A')}")
+                    summary_lines.append(f"     Predicted: ${pred_data.get('predicted_price', 0):.2f}")
+                    summary_lines.append(f"     Actual: ${pred_data.get('actual_price', 0):.2f}")
+                    
+                    error = pred_data.get('error', abs(pred_data.get('actual_price', 0) - pred_data.get('predicted_price', 0)))
+                    error_pct = pred_data.get('error_percent', (error / pred_data.get('actual_price', 1)) * 100)
                     accuracy = "✅ Excellent" if error_pct < 2 else "✓ Good" if error_pct < 5 else "⚠️ Fair" if error_pct < 10 else "❌ Needs Improvement"
-                    summary_lines.append(f"  Accuracy Rating: {accuracy}")
+                    summary_lines.append(f"     Error: ${error:.2f} ({error_pct:.2f}%) - {accuracy}")
                 
-                change = pred_price - current_price
-                change_pct = (change / current_price) * 100
-                direction = "📈 UP" if change > 0 else "📉 DOWN" if change < 0 else "➡️ FLAT"
-                summary_lines.append(f"  Expected Change from Current: ${change:+.2f} ({change_pct:+.2f}%) {direction}")
+                # Future prediction
+                future_pred = pred_data.get('future_prediction', {})
+                if future_pred:
+                    pred_price = future_pred.get('predicted_price', 0)
+                    pred_date = future_pred.get('target_date', 'N/A')
+                    
+                    summary_lines.append(f"  🔮 FUTURE FORECAST:")
+                    summary_lines.append(f"     Target Date: {pred_date}")
+                    summary_lines.append(f"     Predicted Price: ${pred_price:.2f}")
+                    
+                    change = pred_price - current_price
+                    change_pct = (change / current_price) * 100
+                    direction = "📈 UP" if change > 0 else "📉 DOWN" if change < 0 else "➡️ FLAT"
+                    summary_lines.append(f"     Expected Change: ${change:+.2f} ({change_pct:+.2f}%) {direction}")
+                    
+                    if 'confidence_interval' in future_pred:
+                        conf = future_pred['confidence_interval']
+                        summary_lines.append(f"     95% Confidence: ${conf.get('lower', 0):.2f} - ${conf.get('upper', 0):.2f}")
+                elif 'predicted_price' in pred_data and 'future_prediction' not in pred_data:
+                    # Legacy format support
+                    pred_price = pred_data.get('predicted_price', 0)
+                    pred_date = pred_data.get('date', 'N/A')
+                    
+                    change = pred_price - current_price
+                    change_pct = (change / current_price) * 100
+                    direction = "📈 UP" if change > 0 else "📉 DOWN" if change < 0 else "➡️ FLAT"
+                    summary_lines.append(f"  Expected Change from Current: ${change:+.2f} ({change_pct:+.2f}%) {direction}")
         
         # Model Performance
         if self.metrics:
             summary_lines.append("\n🎯 MODEL PERFORMANCE METRICS")
             summary_lines.append("-"*80)
-            r2 = self.metrics.get('R2', 0)
-            rmse = self.metrics.get('RMSE', 0)
-            summary_lines.append(f"R² Score: {r2:.4f} ({'Excellent' if r2 > 0.9 else 'Good' if r2 > 0.7 else 'Fair' if r2 > 0.5 else 'Needs Improvement'})")
-            summary_lines.append(f"Mean Absolute Error (MAE): ${self.metrics.get('MAE', 0):.2f}")
-            summary_lines.append(f"Root Mean Squared Error (RMSE): ${rmse:.2f}")
-            summary_lines.append(f"Mean Squared Error (MSE): {self.metrics.get('MSE', 0):.4f}")
             
-            # RMSE interpretation
-            rmse_pct = (rmse / current_price) * 100 if current_price > 0 else 0
-            summary_lines.append(f"RMSE as % of Current Price: {rmse_pct:.2f}%")
-            
-            if 'best_params' in self.metrics:
-                summary_lines.append(f"\nOptimized Model Parameters:")
-                for param, value in self.metrics['best_params'].items():
-                    summary_lines.append(f"  • {param}: {value}")
+            # Check if it's multi-horizon (dict of metrics) or single model
+            if isinstance(self.metrics, dict) and any(k.endswith('d') for k in self.metrics.keys()):
+                # Multi-horizon metrics
+                summary_lines.append("Performance across all prediction horizons:")
+                for horizon in ['1d', '7d', '30d']:
+                    if horizon in self.metrics:
+                        metrics = self.metrics[horizon]
+                        r2 = metrics.get('R2', 0)
+                        rmse = metrics.get('RMSE', 0)
+                        mae = metrics.get('MAE', 0)
+                        
+                        summary_lines.append(f"\n{horizon} Model:")
+                        summary_lines.append(f"  R² Score: {r2:.4f} ({'Excellent' if r2 > 0.9 else 'Good' if r2 > 0.7 else 'Fair' if r2 > 0.5 else 'Needs Improvement'})")
+                        summary_lines.append(f"  MAE: ${mae:.2f}")
+                        summary_lines.append(f"  RMSE: ${rmse:.2f} ({(rmse / current_price) * 100:.2f}% of current price)")
+            else:
+                # Single model metrics
+                r2 = self.metrics.get('R2', 0)
+                rmse = self.metrics.get('RMSE', 0)
+                summary_lines.append(f"R² Score: {r2:.4f} ({'Excellent' if r2 > 0.9 else 'Good' if r2 > 0.7 else 'Fair' if r2 > 0.5 else 'Needs Improvement'})")
+                summary_lines.append(f"Mean Absolute Error (MAE): ${self.metrics.get('MAE', 0):.2f}")
+                summary_lines.append(f"Root Mean Squared Error (RMSE): ${rmse:.2f}")
+                summary_lines.append(f"Mean Squared Error (MSE): {self.metrics.get('MSE', 0):.4f}")
+                
+                # RMSE interpretation
+                rmse_pct = (rmse / current_price) * 100 if current_price > 0 else 0
+                summary_lines.append(f"RMSE as % of Current Price: {rmse_pct:.2f}%")
+                
+                if 'best_params' in self.metrics:
+                    summary_lines.append(f"\nOptimized Model Parameters:")
+                    for param, value in self.metrics['best_params'].items():
+                        summary_lines.append(f"  • {param}: {value}")
         
         # Trading Recommendation
         summary_lines.append("\n💡 TRADING RECOMMENDATION")
@@ -289,7 +325,7 @@ class ReportGenerator:
             },
             'sentiment_analysis': self.sentiment_info,
             'predictions': {},
-            'model_performance': self.metrics,
+            'model_performance': {},
             'data_coverage': {
                 'start_date': str(self.df.index[0].date()),
                 'end_date': str(self.df.index[-1].date()),
@@ -314,6 +350,21 @@ class ReportGenerator:
         # Multi-horizon predictions
         if self.predictions:
             summary['predictions']['multi_horizon'] = self.predictions
+        
+        # Model performance - handle both single and multi-horizon
+        if self.metrics:
+            if isinstance(self.metrics, dict) and any(k.endswith('d') for k in self.metrics.keys()):
+                # Multi-horizon metrics
+                summary['model_performance'] = {
+                    'type': 'multi_horizon',
+                    'horizons': self.metrics
+                }
+            else:
+                # Single model metrics
+                summary['model_performance'] = {
+                    'type': 'single_step',
+                    'metrics': self.metrics
+                }
         
         # Save to file
         json_file = self.output_dir / "analysis_summary.json"
