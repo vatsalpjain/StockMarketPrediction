@@ -39,3 +39,14 @@ FEATURE_COLS = [
     'RSI_14', 'MACD', 'MACD_Signal', 'MACD_Hist',
     'HMA_20', 'Sentiment_Score'
 ]
+
+# LSTM settings (opt-in; defaults are conservative for low compute)
+LSTM_LOOKBACK = 60
+LSTM_HIDDEN = 64
+LSTM_LAYERS = 1
+LSTM_DROPOUT = 0.1
+LSTM_LR = 1e-3
+LSTM_EPOCHS = 30
+LSTM_BATCH = 128
+USE_QUANTILES = False
+MH_BACKTEST_SPLITS_LSTM = 3

@@ -5,11 +5,17 @@ from data.cache_manager import CacheManager
 from features.technical_indicators import TechnicalIndicators
 from features.sentiment_analyzer import SentimentAnalyzer
 from models.single_step import get_model
+from features.sequence_builder import build_supervised_sequences, fit_feature_scaler, apply_feature_scaler
+from config.settings import (
+    FEATURE_COLS, DEFAULT_PERIOD,
+    LSTM_LOOKBACK, LSTM_HIDDEN, LSTM_LAYERS, LSTM_DROPOUT, LSTM_LR, LSTM_EPOCHS, LSTM_BATCH, USE_QUANTILES
+)
 from models.model_trainer import ModelTrainer
 from visualization.price_plots import PricePlotter
 from visualization.indicator_plots import IndicatorPlotter
 from visualization.report_generator import ReportGenerator
 from config.settings import FEATURE_COLS, DEFAULT_PERIOD
+import numpy as np
 import pandas as pd
 
 class SingleStepPipeline:
@@ -70,9 +76,13 @@ class SingleStepPipeline:
         # Prepare data
         print(f"Training {model_type} model...")
 
-        # TARGET: predict next-day percentage return (more stable than raw price)
-        # r_{t+1} = (Close_{t+1} - Close_t) / Close_t
-        self.df['Target'] = (self.df['Close'].shift(-1) - self.df['Close']) / self.df['Close']
+        # TARGETS
+        if model_type == 'lstm':
+            # Predict next-day closing price directly for LSTM
+            self.df['Target'] = self.df['Close'].shift(-1)
+        else:
+            # r_{t+1} = (Close_{t+1} - Close_t) / Close_t
+            self.df['Target'] = (self.df['Close'].shift(-1) - self.df['Close']) / self.df['Close']
 
         # MINIMAL FEATURE BLOCK: add a few robust, time-series friendly features
         # - Lagged returns, rolling volatility, overnight gap, intraday range
@@ -89,24 +99,70 @@ class SingleStepPipeline:
         X = df_clean[feature_cols_local]
         y = df_clean['Target']
         
-        # Train model
-        model_instance = get_model(model_type)
-        trainer = ModelTrainer(model_instance, verbose=1)
-        
-        param_grid = model_instance.get_param_grid() if use_grid_search else None
-        self.model, self.metrics, test_index, y_pred = trainer.train(X, y, param_grid)
+        if model_type == 'lstm':
+            # LSTM path (sequence-aware)
+            train_size = int(0.8 * len(X))
+            scaler = fit_feature_scaler(X, train_end_index=train_size)
+            X_scaled = apply_feature_scaler(X, scaler)
+            X_seq, y_seq, _ = build_supervised_sequences(X_scaled, y, lookback=LSTM_LOOKBACK)
+            adj_train_size = max(1, train_size - LSTM_LOOKBACK)
+            X_train, y_train = X_seq[:adj_train_size], y_seq[:adj_train_size]
+            X_test, y_test = X_seq[adj_train_size:], y_seq[adj_train_size:]
 
-        # RECONSTRUCT NEXT-DAY PRICE from predicted return and today's Close
-        # Predicted_Close_{t+1} := Close_t * (1 + r̂_{t+1})
-        pred_close = self.df.loc[test_index, 'Close'] * (1 + y_pred)
-        # Keep existing alignment convention: store next-day price prediction at index t
-        self.df.loc[test_index, 'Predicted_Close'] = pred_close
+            # Standardize target (train only), then inverse for predictions
+            y_train_mean = float(np.mean(y_train))
+            y_train_std = float(np.std(y_train)) if float(np.std(y_train)) > 1e-8 else 1.0
+            y_train_stdized = (y_train - y_train_mean) / y_train_std
+
+            import torch
+            Xt = torch.tensor(X_train, dtype=torch.float32)
+            yt = torch.tensor(y_train_stdized, dtype=torch.float32)
+            Xtt = torch.tensor(X_test, dtype=torch.float32)
+
+            # Lazy import to avoid torch requirement unless selected
+            from models.lstm import LSTMTrainer, LSTMConfig
+            cfg = LSTMConfig(
+                input_size=X.shape[1],
+                hidden_size=LSTM_HIDDEN,
+                num_layers=LSTM_LAYERS,
+                dropout=LSTM_DROPOUT,
+                lr=LSTM_LR,
+                epochs=LSTM_EPOCHS,
+                batch_size=LSTM_BATCH,
+                use_quantiles=USE_QUANTILES,
+            )
+            lstm_trainer = LSTMTrainer(cfg)
+            lstm_trainer.fit(Xt, yt, X_val=None, y_val=None)
+            yp, _, _ = lstm_trainer.predict(Xtt)
+            y_pred = (yp.numpy() * y_train_std) + y_train_mean
+
+            # Align test index and write predictions
+            test_index = X.index[train_size:][: len(y_pred)]
+            self.df.loc[test_index, 'Predicted_Close'] = y_pred
+
+            # Compute simple metrics vs true next-day Close on test_index
+            from evaluation.metrics import MetricsCalculator
+            y_true = y.loc[test_index].values
+            self.metrics = MetricsCalculator.calculate_all(y_true, y_pred)
+            self.model = None  # LSTM model handled separately; not used by report
+        else:
+            # Sklearn/XGBoost path
+            model_instance = get_model(model_type)
+            trainer = ModelTrainer(model_instance, verbose=1)
+            param_grid = model_instance.get_param_grid() if use_grid_search else None
+            self.model, self.metrics, test_index, y_pred = trainer.train(X, y, param_grid)
+
+            # RECONSTRUCT NEXT-DAY PRICE from predicted return and today's Close
+            pred_close = self.df.loc[test_index, 'Close'] * (1 + y_pred)
+            # Store next-day price prediction at index t
+            self.df.loc[test_index, 'Predicted_Close'] = pred_close
         
         # Cache model
         self.cache_manager.save_model(self.ticker, self.model, self.metrics, data_hash, model_type)
-        
-        # Print metrics
-        model_instance.print_metrics()
+
+        # Print metrics if available from tree-based trainer
+        if model_type != 'lstm':
+            model_instance.print_metrics()
     
     def generate_visualizations(self, skip_if_exists=True):
         """Step 5: Generate plots"""

@@ -170,7 +170,7 @@ class ReportGenerator:
                 future_pred = pred_data.get('future_prediction', {})
                 if future_pred:
                     pred_price = future_pred.get('predicted_price', 0)
-                    pred_date = future_pred.get('target_date', 'N/A')
+                    pred_date = future_pred.get('date', future_pred.get('target_date', 'N/A'))
                     
                     summary_lines.append(f"  🔮 FUTURE FORECAST:")
                     summary_lines.append(f"     Target Date: {pred_date}")
@@ -184,6 +184,10 @@ class ReportGenerator:
                     if 'confidence_interval' in future_pred:
                         conf = future_pred['confidence_interval']
                         summary_lines.append(f"     95% Confidence: ${conf.get('lower', 0):.2f} - ${conf.get('upper', 0):.2f}")
+                    if 'quantile_band' in future_pred:
+                        qb = future_pred['quantile_band']
+                        if qb and qb.get('p10') is not None and qb.get('p90') is not None:
+                            summary_lines.append(f"     Quantile Band (P10/P90): ${qb['p10']:.2f} / ${qb['p90']:.2f}")
                 elif 'predicted_price' in pred_data and 'future_prediction' not in pred_data:
                     # Legacy format support
                     pred_price = pred_data.get('predicted_price', 0)
@@ -382,7 +386,24 @@ class ReportGenerator:
         
         # Multi-horizon predictions
         if self.predictions:
-            summary['predictions']['multi_horizon'] = self.predictions
+            # Ensure quantile bands (if present) are propagated
+            summary['predictions']['multi_horizon'] = {}
+            for horizon, pred_data in self.predictions.items():
+                if isinstance(pred_data, dict):
+                    fp = pred_data.get('future_prediction', pred_data)
+                    entry = {
+                        'future_prediction': {
+                            'date': fp.get('date'),
+                            'predicted_price': fp.get('predicted_price'),
+                            'change': fp.get('change'),
+                            'change_percent': fp.get('change_percent'),
+                            'confidence_interval': fp.get('confidence_interval')
+                        },
+                        'backtest': pred_data.get('all_predictions', pred_data.get('detailed', []))
+                    }
+                    if 'quantile_band' in fp:
+                        entry['future_prediction']['quantile_band'] = fp['quantile_band']
+                    summary['predictions']['multi_horizon'][horizon] = entry
         
         # Model performance - handle both single and multi-horizon
         if self.metrics:

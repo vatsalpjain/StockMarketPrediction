@@ -51,7 +51,7 @@ Examples:
         '--model',
         type=str,
         default='xgboost',
-        choices=['xgboost', 'ridge', 'random_forest'],
+        choices=['xgboost', 'ridge', 'random_forest', 'lstm'],
         help='Model type to use (default: xgboost)'
     )
     
@@ -89,7 +89,20 @@ Examples:
         help='Skip backtesting (multi-horizon only)'
     )
     
+    parser.add_argument(
+        '--use-quantiles',
+        action='store_true',
+        help='Use quantile heads for LSTM to output prediction bands (default: off)'
+    )
+
     args = parser.parse_args()
+    # Apply runtime flags to settings (non-breaking)
+    try:
+        from config import settings as _settings
+        if getattr(args, 'use_quantiles', False):
+            _settings.USE_QUANTILES = True
+    except Exception:
+        pass
     
     # Select and run pipeline
     try:

@@ -90,8 +90,13 @@ class PricePlotter:
         
         return filepath
     
-    def plot_multi_horizon_predictions(self, filepath, predictions_dict):
-        """Plot predictions for multiple horizons with actual vs predicted - CLEAR AND VISIBLE"""
+    def plot_multi_horizon_predictions(self, filepath, predictions_dict, future_predictions=None):
+        """Plot predictions for multiple horizons with actual vs predicted.
+
+        - predictions_dict: backtest predictions (existing behavior)
+        - future_predictions: optional dict from pipeline with keys like '1d','7d','30d'
+          containing 'predicted_price', 'date', and optional 'quantile_band'.
+        """
         
         fig, ax = plt.subplots(figsize=(20, 10))
         
@@ -137,6 +142,27 @@ class PricePlotter:
                               color=style['color'], marker=style['marker'],
                               s=style['markersize']*15, alpha=0.95, zorder=9, 
                               edgecolors='white', linewidth=1.5)
+
+        # Overlay future forecasts (markers and optional quantile bands)
+        if isinstance(future_predictions, dict) and future_predictions:
+            for horizon, fp in future_predictions.items():
+                date_str = fp.get('date') or fp.get('target_date')
+                price = fp.get('predicted_price')
+                if not date_str or price is None:
+                    continue
+                try:
+                    target_date = pd.to_datetime(date_str)
+                except Exception:
+                    continue
+                style = horizon_styles.get(horizon, {'color': 'blue', 'linewidth': 3, 'linestyle': '-', 'marker': 'o', 'markersize': 6, 'label': f'{horizon} Forecast'})
+                # Draw forecast point
+                ax.scatter([target_date], [price], color=style['color'], marker=style['marker'], s=style['markersize']*30, zorder=12, edgecolors='white', linewidth=1.5, label=f"{style['label']}")
+
+                # Quantile band (vertical range at target date)
+                qb = fp.get('quantile_band')
+                if qb and qb.get('p10') is not None and qb.get('p90') is not None:
+                    p10, p90 = qb['p10'], qb['p90']
+                    ax.vlines([target_date], ymin=p10, ymax=p90, colors=style['color'], alpha=0.35, linewidth=6, label=f"{horizon} P10–P90")
         
         ax.set_title(
             f'{self.ticker} Multi-Horizon Price Predictions (Last {PLOT_MONTHS} Months)',
@@ -180,11 +206,11 @@ class PricePlotter:
                 if isinstance(mask, pd.Series):
                     recent_indices = pred_index[mask]
                     recent_preds = predictions[mask.values] if hasattr(predictions, '__getitem__') else [p for i, p in enumerate(predictions) if mask.iloc[i]]
-                    recent_actuals = actuals[mask]
+                    recent_actuals = actuals[mask] if hasattr(actuals, 'iloc') else [actuals[i] for i, m in enumerate(mask.values) if m]
                 else:
                     recent_indices = [idx for idx in pred_index if idx >= last_months_start]
                     recent_preds = [predictions[i] for i, idx_val in enumerate(pred_index) if idx_val >= last_months_start]
-                    recent_actuals = [actuals.iloc[i] for i, idx_val in enumerate(pred_index) if idx_val >= last_months_start]
+                    recent_actuals = [ (actuals.iloc[i] if hasattr(actuals, 'iloc') else actuals[i]) for i, idx_val in enumerate(pred_index) if idx_val >= last_months_start]
                 
                 if len(recent_indices) > 0:
                     # Add shaded error region FIRST (background)

@@ -3,13 +3,31 @@ from pathlib import Path
 from .single_step_pipeline import SingleStepPipeline
 from models.multi_horizon import MultiHorizonModel
 from models.model_trainer import ModelTrainer
+from features.sequence_builder import (
+    build_supervised_sequences,
+    apply_feature_scaler,
+    fit_feature_scaler,
+)
 from visualization.price_plots import PricePlotter
 from visualization.report_generator import ReportGenerator
-from config.settings import FEATURE_COLS, PREDICTION_HORIZONS
+from config.settings import (
+    FEATURE_COLS,
+    PREDICTION_HORIZONS,
+    LSTM_LOOKBACK,
+    LSTM_HIDDEN,
+    LSTM_LAYERS,
+    LSTM_DROPOUT,
+    LSTM_LR,
+    LSTM_EPOCHS,
+    LSTM_BATCH,
+    USE_QUANTILES,
+)
 from models.single_step import get_model
 import pandas as pd
 import numpy as np
 import pickle
+import os
+import torch
 
 class MultiHorizonPipeline(SingleStepPipeline):
     """Pipeline for multi-horizon predictions"""
@@ -24,11 +42,29 @@ class MultiHorizonPipeline(SingleStepPipeline):
     
     def _get_multihorizon_cache_path(self, horizon):
         """Get cache path for specific horizon model"""
+        if self.model_type == 'lstm':
+            base = self.cache_dir / f"{self.ticker}_multihorizon_{horizon}d_{self.model_type}"
+            return base.with_suffix('.pt')  # weights file; meta stored as .meta.pkl
         return self.cache_dir / f"{self.ticker}_multihorizon_{horizon}d_{self.model_type}.pkl"
     
-    def _save_horizon_model(self, horizon, model, metrics):
+    def _save_horizon_model(self, horizon, model, metrics, scaler=None):
         """Save individual horizon model to cache"""
         cache_path = self._get_multihorizon_cache_path(horizon)
+        if self.model_type == 'lstm':
+            # Save torch weights
+            torch.save(model.state_dict(), cache_path)
+            # Save meta (metrics + scaler path)
+            meta_path = str(cache_path).replace('.pt', '.meta.pkl')
+            scaler_path = None
+            if scaler is not None:
+                scaler_path = str(cache_path).replace('.pt', '.scaler.pkl')
+                with open(scaler_path, 'wb') as sf:
+                    pickle.dump(scaler, sf)
+            with open(meta_path, 'wb') as mf:
+                pickle.dump({'metrics': metrics, 'model_type': self.model_type, 'scaler_path': scaler_path}, mf)
+            print(f"  ✓ Model cached: {cache_path} (+meta)")
+            return
+        # Non-LSTM path (sklearn/xgboost)
         cache_data = {
             'model': model,
             'metrics': metrics,
@@ -41,12 +77,18 @@ class MultiHorizonPipeline(SingleStepPipeline):
     def _load_horizon_model(self, horizon):
         """Load individual horizon model from cache"""
         cache_path = self._get_multihorizon_cache_path(horizon)
-        if not self.force_refresh and cache_path.exists():
+        if not self.force_refresh and os.path.exists(cache_path):
             try:
-                with open(cache_path, 'rb') as f:
-                    cache_data = pickle.load(f)
-                    if cache_data['model_type'] == self.model_type:
-                        return cache_data['model'], cache_data['metrics']
+                if self.model_type == 'lstm':
+                    meta_path = str(cache_path).replace('.pt', '.meta.pkl')
+                    with open(meta_path, 'rb') as mf:
+                        meta = pickle.load(mf)
+                    return cache_path, meta.get('metrics', {})
+                else:
+                    with open(cache_path, 'rb') as f:
+                        cache_data = pickle.load(f)
+                        if cache_data['model_type'] == self.model_type:
+                            return cache_data['model'], cache_data['metrics']
             except Exception as e:
                 print(f"  ⚠ Cache load failed: {e}")
         return None, None
@@ -73,14 +115,19 @@ class MultiHorizonPipeline(SingleStepPipeline):
             cached_model, cached_metrics = self._load_horizon_model(horizon)
             if cached_model is not None:
                 print(f"  ✓ Loaded from cache")
-                model_instance = get_model(model_type)
-                model_instance.model = cached_model
-                self.multi_model.models[f'{horizon}d'] = model_instance
+                if self.model_type == 'lstm':
+                    # Keep path to weights; will be used for inference later
+                    self.multi_model.set_horizon_artifacts(horizon, weights_path=str(cached_model))
+                else:
+                    model_instance = get_model(model_type)
+                    model_instance.model = cached_model
+                    self.multi_model.models[f'{horizon}d'] = model_instance
                 self.multi_metrics[f'{horizon}d'] = cached_metrics
                 
                 # Still need to generate test predictions for detailed analysis
                 target_col = f'Target_{horizon}d'
-                df_clean = df_with_targets.dropna(subset=[target_col])
+                # Ensure no NaNs in features or target (indicators create early NaNs)
+                df_clean = df_with_targets.dropna(subset=[target_col] + FEATURE_COLS)
                 X = df_clean[FEATURE_COLS]
                 y = df_clean[target_col]
                 
@@ -123,33 +170,102 @@ class MultiHorizonPipeline(SingleStepPipeline):
             
             # Train new model
             target_col = f'Target_{horizon}d'
-            df_clean = df_with_targets.dropna(subset=[target_col])
+            # Ensure no NaNs in features or target (indicators create early NaNs)
+            df_clean = df_with_targets.dropna(subset=[target_col] + FEATURE_COLS)
             
             X = df_clean[FEATURE_COLS]
             y = df_clean[target_col]
-            
-            # Get model instance
-            model_instance = self.multi_model.get_models_dict()[f'{horizon}d']
-            trainer = ModelTrainer(model_instance, verbose=0)
-            
-            # Train
-            param_grid = model_instance.get_param_grid() if use_grid_search else None
-            trained_model, metrics, test_index, y_pred = trainer.train(X, y, param_grid)
-            
-            # Store results
-            self.multi_model.models[f'{horizon}d'] = model_instance
-            self.multi_metrics[f'{horizon}d'] = metrics
-            
-            # Save to cache
-            self._save_horizon_model(horizon, model_instance.model, metrics)
-            
-            # Store test predictions with actual values
-            self.backtest_predictions[f'{horizon}d'] = {
-                'predictions': y_pred,
-                'actuals': y.loc[test_index],
-                'dates': test_index,
-                'index': test_index
-            }
+
+            if self.model_type == 'lstm':
+                # Sequence-aware path
+                # Fit scaler on train portion only (time-ordered)
+                train_size = int(0.8 * len(X))
+                scaler = fit_feature_scaler(X, train_end_index=train_size)
+                X_scaled = apply_feature_scaler(X, scaler)
+
+                # Build sequences
+                X_seq, y_seq, meta = build_supervised_sequences(X_scaled, y, lookback=LSTM_LOOKBACK)
+                # Align split with earlier scaling (reduce by lookback)
+                adj_train_size = max(1, train_size - LSTM_LOOKBACK)
+                X_train, y_train = X_seq[:adj_train_size], y_seq[:adj_train_size]
+                X_test, y_test = X_seq[adj_train_size:], y_seq[adj_train_size:]
+
+                # Standardize target on train only to stabilize training; store stats for inverse transform
+                y_train_mean = float(np.mean(y_train))
+                y_train_std = float(np.std(y_train)) if float(np.std(y_train)) > 1e-8 else 1.0
+                y_train_stdized = (y_train - y_train_mean) / y_train_std
+                y_test_stdized = (y_test - y_train_mean) / y_train_std
+
+                # Torch tensors
+                Xt = torch.tensor(X_train, dtype=torch.float32)
+                yt = torch.tensor(y_train_stdized, dtype=torch.float32)
+                Xtt = torch.tensor(X_test, dtype=torch.float32)
+                ytt = torch.tensor(y_test_stdized, dtype=torch.float32)
+
+                # Lazy import to avoid torch requirement unless LSTM is selected
+                from models.lstm import LSTMTrainer, LSTMConfig
+                cfg = LSTMConfig(
+                    input_size=X.shape[1],
+                    hidden_size=LSTM_HIDDEN,
+                    num_layers=LSTM_LAYERS,
+                    dropout=LSTM_DROPOUT,
+                    lr=LSTM_LR,
+                    epochs=LSTM_EPOCHS,
+                    batch_size=LSTM_BATCH,
+                    use_quantiles=USE_QUANTILES,
+                )
+                lstm_trainer = LSTMTrainer(cfg)
+                lstm_trainer.fit(Xt, yt, X_val=None, y_val=None)
+
+                # Evaluate on test
+                yp, _, _ = lstm_trainer.predict(Xtt)
+                y_pred_std = yp.numpy()
+                # Inverse standardization back to price scale
+                y_pred = (y_pred_std * y_train_std) + y_train_mean
+                from evaluation.metrics import MetricsCalculator
+                metrics = MetricsCalculator.calculate_all(y_test, y_pred)
+
+                # Save to cache (weights + scaler + target stats)
+                # augment meta later when saving
+                self._save_horizon_model(horizon, lstm_trainer.model, metrics, scaler=scaler)
+                # Save target stats alongside meta
+                meta_path = str(self._get_multihorizon_cache_path(horizon)).replace('.pt', '.meta.pkl')
+                try:
+                    with open(meta_path, 'rb') as mf:
+                        meta = pickle.load(mf)
+                except Exception:
+                    meta = {}
+                meta['y_mean'] = y_train_mean
+                meta['y_std'] = y_train_std
+                with open(meta_path, 'wb') as mf:
+                    pickle.dump(meta, mf)
+                self.multi_metrics[f'{horizon}d'] = metrics
+                self.multi_model.set_horizon_artifacts(horizon, weights_path=str(self._get_multihorizon_cache_path(horizon)))
+
+                # Build index alignment for backtest record
+                test_index = X.iloc[train_size:].index
+                test_index = test_index[: len(y_pred)]
+                self.backtest_predictions[f'{horizon}d'] = {
+                    'predictions': y_pred,
+                    'actuals': y.loc[test_index],  # keep as Series for downstream plotting
+                    'dates': test_index,
+                    'index': test_index
+                }
+            else:
+                # Sklearn/xgboost path
+                model_instance = self.multi_model.get_models_dict()[f'{horizon}d']
+                trainer = ModelTrainer(model_instance, verbose=0)
+                param_grid = model_instance.get_param_grid() if use_grid_search else None
+                trained_model, metrics, test_index, y_pred = trainer.train(X, y, param_grid)
+                self.multi_model.models[f'{horizon}d'] = model_instance
+                self.multi_metrics[f'{horizon}d'] = metrics
+                self._save_horizon_model(horizon, model_instance.model, metrics)
+                self.backtest_predictions[f'{horizon}d'] = {
+                    'predictions': y_pred,
+                    'actuals': y.loc[test_index],
+                    'dates': test_index,
+                    'index': test_index
+                }
             
             # Calculate detailed error metrics for most recent predictions
             recent_preds = y_pred[-10:]
@@ -181,7 +297,9 @@ class MultiHorizonPipeline(SingleStepPipeline):
         """Make predictions for all horizons using latest data"""
         
         if not self.multi_model or not self.multi_model.models:
-            raise ValueError("Models not trained. Call train_multihorizon_models() first.")
+            # For LSTM path, models dict is not used; artifacts hold weights
+            if self.model_type != 'lstm':
+                raise ValueError("Models not trained. Call train_multihorizon_models() first.")
         
         # Get latest data point
         latest_data = self.df[FEATURE_COLS].iloc[-1:].copy()
@@ -197,11 +315,49 @@ class MultiHorizonPipeline(SingleStepPipeline):
         print(f"Current Date: {current_date.date()}\n")
         
         for horizon in PREDICTION_HORIZONS:
-            model = self.multi_model.models[f'{horizon}d'].model
-            if model is None:
-                continue
-            
-            pred = model.predict(latest_data)[0]
+            if self.model_type == 'lstm':
+                # Load scaler and weights
+                weights_path = self.multi_model.get_horizon_artifacts(horizon).get('weights_path')
+                if not weights_path:
+                    continue
+                meta_path = weights_path.replace('.pt', '.meta.pkl')
+                with open(meta_path, 'rb') as mf:
+                    meta = pickle.load(mf)
+                scaler_path = meta.get('scaler_path')
+                from sklearn.preprocessing import StandardScaler
+                scaler = None
+                if scaler_path and os.path.exists(scaler_path):
+                    with open(scaler_path, 'rb') as sf:
+                        scaler = pickle.load(sf)
+                # Scale recent window
+                X_all = self.df[FEATURE_COLS]
+                if scaler is None:
+                    scaler = StandardScaler().fit(X_all.values)
+                X_scaled = apply_feature_scaler(X_all, scaler)
+                # Build last window
+                from config.settings import LSTM_LOOKBACK as LB
+                window = X_scaled.values[-LB:]
+                if len(window) < LB:
+                    continue
+                xw = torch.tensor(window[None, ...], dtype=torch.float32)
+                from models.lstm import LSTMTrainer, LSTMConfig
+                cfg = LSTMConfig(input_size=X_all.shape[1], hidden_size=LSTM_HIDDEN, num_layers=LSTM_LAYERS, dropout=LSTM_DROPOUT, lr=LSTM_LR, epochs=1, batch_size=1, use_quantiles=USE_QUANTILES)
+                lstm_trainer = LSTMTrainer(cfg)
+                lstm_trainer.load(weights_path)
+                # Load target stats for inverse transform
+                y_mean = meta.get('y_mean')
+                y_std = meta.get('y_std') or 1.0
+                yp, y10, y90 = lstm_trainer.predict(xw)
+                pred_std = float(yp.numpy().ravel()[0])
+                pred = float(pred_std * y_std + y_mean)
+                # Optionally store bands
+                lower = float(y10.numpy().ravel()[0] * y_std + y_mean) if y10 is not None else None
+                upper = float(y90.numpy().ravel()[0] * y_std + y_mean) if y90 is not None else None
+            else:
+                model = self.multi_model.models[f'{horizon}d'].model
+                if model is None:
+                    continue
+                pred = model.predict(latest_data)[0]
             change = pred - current_price
             change_pct = (change / current_price) * 100
             
@@ -225,7 +381,7 @@ class MultiHorizonPipeline(SingleStepPipeline):
                 confidence_lower = pred * 0.95
                 confidence_upper = pred * 1.05
             
-            predictions[f'{horizon}d'] = {
+            entry = {
                 'predicted_price': float(pred),
                 'change': float(change),
                 'change_percent': float(change_pct),
@@ -236,6 +392,9 @@ class MultiHorizonPipeline(SingleStepPipeline):
                 },
                 'historical_avg_error_percent': float(avg_error) if avg_error else None
             }
+            if self.model_type == 'lstm' and (y10 is not None and y90 is not None):
+                entry['quantile_band'] = {'p10': lower, 'p90': upper}
+            predictions[f'{horizon}d'] = entry
             
             direction = "📈" if change > 0 else "📉"
             print(f"{horizon}-Day Prediction:")
@@ -260,7 +419,12 @@ class MultiHorizonPipeline(SingleStepPipeline):
         # Multi-horizon prediction overlay
         print("Creating multi-horizon prediction plot...")
         filepath = plots_dir / "multi_horizon_predictions.png"
-        plotter.plot_multi_horizon_predictions(filepath, self.backtest_predictions)
+        # Pass future predictions for overlay if available
+        future_preds = {
+            k: v if 'predicted_price' in v else v.get('future_prediction', {})
+            for k, v in (self.predictions or {}).items()
+        } if self.predictions else None
+        plotter.plot_multi_horizon_predictions(filepath, self.backtest_predictions, future_predictions=future_preds)
         print(f"✓ Saved: {filepath}")
         
         # Detailed backtest comparison
@@ -273,6 +437,7 @@ class MultiHorizonPipeline(SingleStepPipeline):
     def backtest_multihorizon(self, n_splits=5):
         """Backtest multi-horizon predictions using walk-forward validation"""
         from evaluation.backtester import Backtester
+        from config.settings import MH_BACKTEST_SPLITS_LSTM
         
         print(f"\n{'='*70}")
         print(f"BACKTESTING MULTI-HORIZON MODELS (Walk-Forward Validation)")
@@ -303,8 +468,15 @@ class MultiHorizonPipeline(SingleStepPipeline):
             # Set the target column for backtester
             backtester.target_col = target_col
             
-            # Run walk-forward validation
-            avg_metrics = backtester.walk_forward_validation(n_splits=n_splits, horizon=horizon)
+            # Run walk-forward validation (fewer splits for LSTM/low data)
+            splits = n_splits
+            if self.model_type == 'lstm':
+                splits = MH_BACKTEST_SPLITS_LSTM
+                # Reduce splits if dataset is small
+                min_points_per_split = 50
+                max_splits = max(2, len(df_clean) // min_points_per_split)
+                splits = max(2, min(splits, max_splits))
+            avg_metrics = backtester.walk_forward_validation(n_splits=splits, horizon=horizon)
             backtester.print_summary()
             
             backtest_results[f'{horizon}d'] = avg_metrics

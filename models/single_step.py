@@ -3,6 +3,11 @@ from xgboost import XGBRegressor
 from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor
 from .base_model import BaseStockModel
+try:
+    from .lstm import LSTMTrainer, LSTMConfig  # optional, used via pipeline branches
+except Exception:
+    LSTMTrainer = None
+    LSTMConfig = None
 
 class XGBoostModel(BaseStockModel):
     """XGBoost model for stock prediction"""
@@ -57,10 +62,15 @@ def get_model(model_type='xgboost'):
     models = {
         'xgboost': XGBoostModel,
         'ridge': RidgeModel,
-        'random_forest': RandomForestModel
+        'random_forest': RandomForestModel,
+        # 'lstm' is handled explicitly in pipelines; placeholder keeps API stable
+        'lstm': None,
     }
     
     if model_type not in models:
         raise ValueError(f"Unknown model type: {model_type}")
     
+    if models[model_type] is None:
+        # Pipelines should handle LSTM separately; this preserves backward compatibility
+        raise NotImplementedError("LSTM is handled in pipelines; do not use get_model('lstm') directly")
     return models[model_type]()
