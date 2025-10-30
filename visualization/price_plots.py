@@ -57,7 +57,8 @@ class PricePlotter:
         
         # Add metrics box
         if metrics:
-            textstr = f'Model Performance:\nR² = {metrics["R2"]:.3f}\nMAE = ${metrics["MAE"]:.2f}'
+            # NOTE: Metrics are computed on returns after recent changes; display MAE as percent
+            textstr = f'Model Performance:\nR² = {metrics["R2"]:.3f}\nMAE (ret) = {metrics["MAE"]*100:.2f}%'
             props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
             ax1.text(0.02, 0.98, textstr, transform=ax1.transAxes, fontsize=10,
                      verticalalignment='top', bbox=props)

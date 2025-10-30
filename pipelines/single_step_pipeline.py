@@ -69,10 +69,24 @@ class SingleStepPipeline:
         
         # Prepare data
         print(f"Training {model_type} model...")
-        self.df['Target'] = self.df['Close'].shift(-1)
+
+        # TARGET: predict next-day percentage return (more stable than raw price)
+        # r_{t+1} = (Close_{t+1} - Close_t) / Close_t
+        self.df['Target'] = (self.df['Close'].shift(-1) - self.df['Close']) / self.df['Close']
+
+        # MINIMAL FEATURE BLOCK: add a few robust, time-series friendly features
+        # - Lagged returns, rolling volatility, overnight gap, intraday range
+        self.df['Ret_1'] = self.df['Close'].pct_change(1)
+        self.df['Ret_5'] = self.df['Close'].pct_change(5)
+        self.df['Vol_5'] = self.df['Ret_1'].rolling(5).std()
+        self.df['Gap'] = (self.df['Open'] - self.df['Close'].shift(1)) / self.df['Close'].shift(1)
+        self.df['Range'] = (self.df['High'] - self.df['Low']) / self.df['Close']
+
         df_clean = self.df.dropna()
-        
-        X = df_clean[FEATURE_COLS]
+
+        # Use existing FEATURE_COLS + the small feature block (local-only, no global setting change)
+        feature_cols_local = FEATURE_COLS + ['Ret_1', 'Ret_5', 'Vol_5', 'Gap', 'Range']
+        X = df_clean[feature_cols_local]
         y = df_clean['Target']
         
         # Train model
@@ -81,9 +95,12 @@ class SingleStepPipeline:
         
         param_grid = model_instance.get_param_grid() if use_grid_search else None
         self.model, self.metrics, test_index, y_pred = trainer.train(X, y, param_grid)
-        
-        # Add predictions to dataframe
-        self.df.loc[test_index, 'Predicted_Close'] = y_pred
+
+        # RECONSTRUCT NEXT-DAY PRICE from predicted return and today's Close
+        # Predicted_Close_{t+1} := Close_t * (1 + r̂_{t+1})
+        pred_close = self.df.loc[test_index, 'Close'] * (1 + y_pred)
+        # Keep existing alignment convention: store next-day price prediction at index t
+        self.df.loc[test_index, 'Predicted_Close'] = pred_close
         
         # Cache model
         self.cache_manager.save_model(self.ticker, self.model, self.metrics, data_hash, model_type)
@@ -125,6 +142,8 @@ class SingleStepPipeline:
             self.metrics,
             self.sentiment_info
         )
+        # Pass trained model so report can forecast using returns and build walk-forward summary
+        reporter.model = self.model
         reporter.generate_all()
     
     def run(self, model_type='xgboost', skip_plots=False):

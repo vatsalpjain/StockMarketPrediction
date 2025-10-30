@@ -98,7 +98,9 @@ class ReportGenerator:
                 # Get last prediction with actual
                 last_pred_idx = predictions.index[-1]
                 last_pred = predictions.iloc[-1]
-                actual_price = self.df.loc[last_pred_idx, 'Close']
+                # ALIGNMENT FIX: compare against next day's actual (t+1)
+                # The prediction at index t represents price at t+1
+                actual_price = self.df['Close'].shift(-1).loc[last_pred_idx]
                 pred_date = last_pred_idx.strftime('%Y-%m-%d')
                 
                 summary_lines.append(f"Most Recent Prediction Date: {pred_date}")
@@ -115,25 +117,29 @@ class ReportGenerator:
                 prediction_coverage = (len(predictions) / len(self.df)) * 100
                 summary_lines.append(f"Prediction Coverage: {prediction_coverage:.1f}% of total data points")
                 
-                # Next forecast
+                # Next forecast (model now predicts returns; reconstruct price)
                 next_pred_date = (self.df.index[-1] + pd.Timedelta(days=1)).strftime('%Y-%m-%d')
                 summary_lines.append(f"")
                 summary_lines.append(f"Next Trading Day Forecast: {next_pred_date}")
                 
-                # Use the last valid prediction as next day forecast
+                # Use the latest available feature row to generate a forecast
                 if len(self.df) > 0:
                     latest_features_idx = self.df.dropna(subset=['SMA_20', 'EMA_20', 'RSI_14']).index[-1]
                     if hasattr(self, 'model') and self.model is not None:
-                        # Make a prediction for next day
-                        feature_cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'SMA_20', 'EMA_20',
+                        # Build feature list to match training (include small feature block if present)
+                        base_feats = ['Open', 'High', 'Low', 'Close', 'Volume', 'SMA_20', 'EMA_20',
                                       'UPPER_BAND', 'LOWER_BAND', 'RSI_14', 'MACD', 'MACD_Signal', 'MACD_Hist', 'HMA_20', 'Sentiment_Score']
-                        latest_features = self.df.loc[latest_features_idx, feature_cols].values.reshape(1, -1)
-                        next_pred = self.model.predict(latest_features)[0]
+                        extra_feats = ['Ret_1', 'Ret_5', 'Vol_5', 'Gap', 'Range']
+                        feat_list = [c for c in (base_feats + extra_feats) if c in self.df.columns]
+                        latest_features = self.df.loc[latest_features_idx, feat_list].values.reshape(1, -1)
+                        # Model predicts return; reconstruct price
+                        pred_return = self.model.predict(latest_features)[0]
+                        next_pred_price = current_price * (1 + pred_return)
                     else:
-                        next_pred = last_pred
+                        next_pred_price = last_pred
                     
-                    summary_lines.append(f"Forecasted Close: ${next_pred:.2f}")
-                    change = next_pred - current_price
+                    summary_lines.append(f"Forecasted Close: ${next_pred_price:.2f}")
+                    change = next_pred_price - current_price
                     change_pct = (change / current_price) * 100
                     direction = "📈 UPWARD" if change > 0 else "📉 DOWNWARD" if change < 0 else "➡️ FLAT"
                     summary_lines.append(f"Expected Movement: ${change:+.2f} ({change_pct:+.2f}%) {direction}")
@@ -188,7 +194,7 @@ class ReportGenerator:
                     direction = "📈 UP" if change > 0 else "📉 DOWN" if change < 0 else "➡️ FLAT"
                     summary_lines.append(f"  Expected Change from Current: ${change:+.2f} ({change_pct:+.2f}%) {direction}")
         
-        # Model Performance
+        # Model Performance (metrics are now on returns; show as percentages)
         if self.metrics:
             summary_lines.append("\n🎯 MODEL PERFORMANCE METRICS")
             summary_lines.append("-"*80)
@@ -209,22 +215,49 @@ class ReportGenerator:
                         summary_lines.append(f"  MAE: ${mae:.2f}")
                         summary_lines.append(f"  RMSE: ${rmse:.2f} ({(rmse / current_price) * 100:.2f}% of current price)")
             else:
-                # Single model metrics
+                # Single model metrics on returns: display as percentages
                 r2 = self.metrics.get('R2', 0)
                 rmse = self.metrics.get('RMSE', 0)
+                mae = self.metrics.get('MAE', 0)
                 summary_lines.append(f"R² Score: {r2:.4f} ({'Excellent' if r2 > 0.9 else 'Good' if r2 > 0.7 else 'Fair' if r2 > 0.5 else 'Needs Improvement'})")
-                summary_lines.append(f"Mean Absolute Error (MAE): ${self.metrics.get('MAE', 0):.2f}")
-                summary_lines.append(f"Root Mean Squared Error (RMSE): ${rmse:.2f}")
-                summary_lines.append(f"Mean Squared Error (MSE): {self.metrics.get('MSE', 0):.4f}")
-                
-                # RMSE interpretation
-                rmse_pct = (rmse / current_price) * 100 if current_price > 0 else 0
-                summary_lines.append(f"RMSE as % of Current Price: {rmse_pct:.2f}%")
+                summary_lines.append(f"MAE (return): {mae*100:.2f}%")
+                summary_lines.append(f"RMSE (return): {rmse*100:.2f}%")
+                summary_lines.append(f"MSE (return): {(self.metrics.get('MSE', 0))*10000:.4f} (pct^2)")
                 
                 if 'best_params' in self.metrics:
                     summary_lines.append(f"\nOptimized Model Parameters:")
                     for param, value in self.metrics['best_params'].items():
                         summary_lines.append(f"  • {param}: {value}")
+
+        # SINGLE-STEP WALK-FORWARD SUMMARY (time-aware over 5 splits)
+        try:
+            from evaluation.backtester import Backtester
+            from config.settings import FEATURE_COLS
+            summary_lines.append("\n🧪 WALK-FORWARD VALIDATION (Single-Step)")
+            summary_lines.append("-"*80)
+            # Only drop rows missing required training columns (avoid dropping rows due to Predicted_Close etc.)
+            df_wf = self.df.dropna(subset=feat_list + ['Target']).copy()
+            # Build feature list used during training (include small feature block if present)
+            base_feats = FEATURE_COLS
+            extra_feats = ['Ret_1', 'Ret_5', 'Vol_5', 'Gap', 'Range']
+            feat_list = [c for c in (base_feats + extra_feats) if c in df_wf.columns]
+            backtester = Backtester(df_wf, getattr(self, 'model', None), feat_list)
+            # Target is returns in column 'Target' after recent changes
+            backtester.target_col = 'Target'
+            avg_metrics = backtester.walk_forward_validation(n_splits=5, horizon=1)
+            if avg_metrics:
+                # Convert return errors to % for readability
+                mae_pct = avg_metrics.get('avg_MAE', 0) * 100
+                rmse_pct = avg_metrics.get('avg_RMSE', 0) * 100
+                dir_acc = avg_metrics.get('avg_Direction_Accuracy', 0)
+                summary_lines.append(f"Avg MAE (return): {mae_pct:.2f}%")
+                summary_lines.append(f"Avg RMSE (return): {rmse_pct:.2f}%")
+                summary_lines.append(f"Avg Direction Accuracy: {dir_acc:.2f}%")
+            else:
+                summary_lines.append("Insufficient data for walk-forward summary.")
+        except Exception:
+            # Keep reports resilient even if any optional import/step fails
+            pass
         
         # Trading Recommendation
         summary_lines.append("\n💡 TRADING RECOMMENDATION")

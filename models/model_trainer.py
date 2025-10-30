@@ -1,5 +1,5 @@
 """Model training logic with GridSearchCV"""
-from sklearn.model_selection import train_test_split, GridSearchCV
+from sklearn.model_selection import train_test_split, GridSearchCV, TimeSeriesSplit
 import numpy as np
 from config.settings import TRAIN_TEST_SPLIT, RANDOM_STATE, CV_FOLDS
 
@@ -30,7 +30,8 @@ class ModelTrainer:
             grid_search = GridSearchCV(
                 self.model.get_model(),
                 param_grid=param_grid,
-                cv=CV_FOLDS,
+                # Use time-aware CV for time series data
+                cv=TimeSeriesSplit(n_splits=CV_FOLDS),
                 scoring='neg_mean_squared_error',
                 n_jobs=-1,
                 verbose=self.verbose
@@ -44,11 +45,56 @@ class ModelTrainer:
             
             print("\nBest Parameters:", self.best_params)
             print(f"Best CV Score (MSE): {self.cv_score:.4f}")
+
+            # For XGBoost, refit with early stopping on a validation tail to reduce overfitting
+            try:
+                from xgboost import XGBRegressor  # local import to avoid hard dependency for non-XGB runs
+                if isinstance(self.best_estimator, XGBRegressor):
+                    # Create validation split from the tail of training data (time-aware)
+                    val_size = max(1, int(0.2 * len(X_train)))
+                    X_tr, X_val = X_train.iloc[:-val_size], X_train.iloc[-val_size:]
+                    y_tr, y_val = y_train.iloc[:-val_size], y_train.iloc[-val_size:]
+
+                    # Rebuild the model with best params to enable early stopping cleanly
+                    best_params = {**self.best_estimator.get_params()}
+                    # Ensure objective and random_state are set
+                    best_params['objective'] = 'reg:squarederror'
+                    best_params['random_state'] = RANDOM_STATE
+                    model_es = XGBRegressor(**best_params)
+                    # Early stopping on validation tail
+                    model_es.fit(
+                        X_tr, y_tr,
+                        eval_set=[(X_val, y_val)],
+                        early_stopping_rounds=50,
+                        eval_metric=['rmse', 'mae'],  # monitor both magnitude and stability
+                        verbose=False
+                    )
+                    self.best_estimator = model_es
+            except Exception:
+                # If XGBoost is unavailable or any issue arises, proceed with grid_search estimator
+                pass
             
         else:
             print("Training without hyperparameter tuning...")
             model_instance = self.model.get_model()
-            model_instance.fit(X_train, y_train)
+            # Add early stopping for XGBoost using a small validation tail
+            try:
+                from xgboost import XGBRegressor  # local import
+                if isinstance(model_instance, XGBRegressor):
+                    val_size = max(1, int(0.2 * len(X_train)))
+                    X_tr, X_val = X_train.iloc[:-val_size], X_train.iloc[-val_size:]
+                    y_tr, y_val = y_train.iloc[:-val_size], y_train.iloc[-val_size:]
+                    model_instance.fit(
+                        X_tr, y_tr,
+                        eval_set=[(X_val, y_val)],
+                        early_stopping_rounds=50,
+                        eval_metric=['rmse', 'mae'],  # monitor both magnitude and stability
+                        verbose=False
+                    )
+                else:
+                    model_instance.fit(X_train, y_train)
+            except Exception:
+                model_instance.fit(X_train, y_train)
             self.best_estimator = model_instance
         
         # Make predictions

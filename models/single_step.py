@@ -11,10 +11,12 @@ class XGBoostModel(BaseStockModel):
         return XGBRegressor(objective='reg:squarederror', random_state=42)
     
     def get_param_grid(self):
+        # Narrowed, regularization-focused grid for time-series; pairs well with early stopping
         return {
-            'n_estimators': [100, 200],
-            'max_depth': [3, 5],
-            'learning_rate': [0.01, 0.1],
+            'n_estimators': [300, 600],              # allow more trees; early stopping will cap effective count
+            'learning_rate': [0.03, 0.05, 0.1],     # smaller LR improves generalization
+            'max_depth': [2, 3, 4],                 # shallower trees reduce variance
+            'min_child_weight': [1, 3, 5],          # controls overfitting on noisy targets
             'subsample': [0.8, 1.0],
             'colsample_bytree': [0.8, 1.0],
             'reg_alpha': [0, 0.1, 1],
