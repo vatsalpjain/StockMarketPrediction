@@ -1,6 +1,10 @@
 """News sentiment analysis from multiple APIs"""
 import requests
-import finnhub
+try:
+    import finnhub
+    FINNHUB_AVAILABLE = True
+except ImportError:
+    FINNHUB_AVAILABLE = False
 from config.api_keys import APIKeys
 
 class SentimentAnalyzer:
@@ -48,6 +52,9 @@ class SentimentAnalyzer:
     
     def fetch_finnhub_sentiment(self):
         """Fetch sentiment from Finnhub API"""
+        if not FINNHUB_AVAILABLE:
+            return None
+        
         api_key = APIKeys.get_finnhub_key()
         if not api_key:
             return None

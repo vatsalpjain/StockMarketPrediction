@@ -1,5 +1,11 @@
 """Single-step (1-day ahead) prediction model"""
-from xgboost import XGBRegressor
+try:
+    from xgboost import XGBRegressor
+    XGBOOST_AVAILABLE = True
+except ImportError:
+    XGBOOST_AVAILABLE = False
+    XGBRegressor = None
+
 from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor
 from .base_model import BaseStockModel
@@ -13,6 +19,8 @@ class XGBoostModel(BaseStockModel):
     """XGBoost model for stock prediction"""
     
     def get_model(self):
+        if not XGBOOST_AVAILABLE:
+            raise ImportError("XGBoost is not installed. Run: pip install xgboost")
         return XGBRegressor(objective='reg:squarederror', random_state=42)
     
     def get_param_grid(self):
