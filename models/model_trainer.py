@@ -16,13 +16,18 @@ class ModelTrainer:
     def train(self, X, y, param_grid=None):
         """Train model with GridSearchCV"""
         
-        # Split data
-        X_train, X_test, y_train, y_test = train_test_split(
-            X, y, 
-            train_size=TRAIN_TEST_SPLIT, 
-            shuffle=False,
-            random_state=RANDOM_STATE
-        )
+        # PROBLEM 5 FIX: Use time-ordered split without shuffle for time series
+        # This ensures no data leakage across train/test boundary
+        # Split point calculation accounts for the fact that we need clean separation
+        train_size = int(len(X) * TRAIN_TEST_SPLIT)
+        
+        # Time-ordered split (no shuffle!)
+        X_train = X.iloc[:train_size]
+        X_test = X.iloc[train_size:]
+        y_train = y.iloc[:train_size]
+        y_test = y.iloc[train_size:]
+        
+        print(f"Training set: {len(X_train)} samples | Test set: {len(X_test)} samples")
         
         if param_grid:
             print(f"Training with GridSearchCV (CV={CV_FOLDS})...")

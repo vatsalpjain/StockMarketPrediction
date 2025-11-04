@@ -261,9 +261,7 @@ def show_about_page():
     used as the sole basis for investment decisions. Always consult with 
     financial professionals before making investment choices.
     
-    ## 📝 License
-    
-    This project is open source and available for educational use.
+
     
     ## 👨‍💻 Developer
     

@@ -53,22 +53,30 @@ class MultiHorizonPipeline(SingleStepPipeline):
         if self.model_type == 'lstm':
             # Save torch weights
             torch.save(model.state_dict(), cache_path)
-            # Save meta (metrics + scaler path)
+            # Save meta (metrics + scaler path + feature_cols)
             meta_path = str(cache_path).replace('.pt', '.meta.pkl')
             scaler_path = None
             if scaler is not None:
                 scaler_path = str(cache_path).replace('.pt', '.scaler.pkl')
                 with open(scaler_path, 'wb') as sf:
                     pickle.dump(scaler, sf)
+            from config.settings import FEATURE_COLS
             with open(meta_path, 'wb') as mf:
-                pickle.dump({'metrics': metrics, 'model_type': self.model_type, 'scaler_path': scaler_path}, mf)
+                pickle.dump({
+                    'metrics': metrics, 
+                    'model_type': self.model_type, 
+                    'scaler_path': scaler_path,
+                    'feature_cols': FEATURE_COLS
+                }, mf)
             print(f"  ✓ Model cached: {cache_path} (+meta)")
             return
         # Non-LSTM path (sklearn/xgboost)
+        from config.settings import FEATURE_COLS
         cache_data = {
             'model': model,
             'metrics': metrics,
-            'model_type': self.model_type
+            'model_type': self.model_type,
+            'feature_cols': FEATURE_COLS
         }
         with open(cache_path, 'wb') as f:
             pickle.dump(cache_data, f)
@@ -114,59 +122,90 @@ class MultiHorizonPipeline(SingleStepPipeline):
             # Try loading from cache first
             cached_model, cached_metrics = self._load_horizon_model(horizon)
             if cached_model is not None:
-                print(f"  ✓ Loaded from cache")
+                # Validate feature columns for both LSTM and non-LSTM
+                cache_valid = True
                 if self.model_type == 'lstm':
-                    # Keep path to weights; will be used for inference later
-                    self.multi_model.set_horizon_artifacts(horizon, weights_path=str(cached_model))
+                    # For LSTM, cached_model is actually the weights path
+                    meta_path = str(cached_model).replace('.pt', '.meta.pkl')
+                    try:
+                        with open(meta_path, 'rb') as mf:
+                            meta = pickle.load(mf)
+                            cached_features = meta.get('feature_cols')
+                            if cached_features is not None and cached_features != FEATURE_COLS:
+                                print(f"  ⚠ Cache invalid: Feature columns changed, retraining...")
+                                cache_valid = False
+                    except Exception:
+                        cache_valid = False
                 else:
-                    model_instance = get_model(model_type)
-                    model_instance.model = cached_model
-                    self.multi_model.models[f'{horizon}d'] = model_instance
-                self.multi_metrics[f'{horizon}d'] = cached_metrics
+                    # For non-LSTM, validate from pickle
+                    cache_path = self._get_multihorizon_cache_path(horizon)
+                    try:
+                        with open(cache_path, 'rb') as f:
+                            cache_data = pickle.load(f)
+                            cached_features = cache_data.get('feature_cols')
+                            if cached_features is not None and cached_features != FEATURE_COLS:
+                                print(f"  ⚠ Cache invalid: Feature columns changed, retraining...")
+                                cache_valid = False
+                    except Exception:
+                        cache_valid = False
                 
-                # Still need to generate test predictions for detailed analysis
-                target_col = f'Target_{horizon}d'
-                # Ensure no NaNs in features or target (indicators create early NaNs)
-                df_clean = df_with_targets.dropna(subset=[target_col] + FEATURE_COLS)
-                X = df_clean[FEATURE_COLS]
-                y = df_clean[target_col]
-                
-                # Use same train/test split
-                train_size = int(0.8 * len(X))
-                X_test = X.iloc[train_size:]
-                y_test = y.iloc[train_size:]
-                test_index = X_test.index
-                y_pred = cached_model.predict(X_test)
-                
-                # Store test predictions
-                self.backtest_predictions[f'{horizon}d'] = {
-                    'predictions': y_pred,
-                    'actuals': y_test,
-                    'dates': test_index,
-                    'index': test_index
-                }
-                
-                # Store detailed recent predictions
-                recent_preds = y_pred[-10:]
-                recent_actuals = y_test.iloc[-10:]
-                recent_dates = test_index[-10:]
-                
-                detailed_predictions = []
-                for date, pred, actual in zip(recent_dates, recent_preds, recent_actuals):
-                    error = abs(actual - pred)
-                    error_pct = (error / actual) * 100
-                    detailed_predictions.append({
-                        'date': date.strftime('%Y-%m-%d'),
-                        'predicted_price': float(pred),
-                        'actual_price': float(actual),
-                        'error': float(error),
-                        'error_percent': float(error_pct)
-                    })
-                
-                self.backtest_predictions[f'{horizon}d']['detailed'] = detailed_predictions
-                
-                print(f"  ✓ {horizon}-day model: MAE=${cached_metrics['MAE']:.2f}, RMSE=${cached_metrics['RMSE']:.2f}, R²={cached_metrics['R2']:.4f}")
-                continue
+                if cache_valid:
+                    print(f"  ✓ Loaded from cache")
+                    if self.model_type == 'lstm':
+                        # Keep path to weights; will be used for inference later
+                        self.multi_model.set_horizon_artifacts(horizon, weights_path=str(cached_model))
+                    else:
+                        model_instance = get_model(model_type)
+                        model_instance.model = cached_model
+                        self.multi_model.models[f'{horizon}d'] = model_instance
+                    
+                    self.multi_metrics[f'{horizon}d'] = cached_metrics
+                    
+                    # Still need to generate test predictions for detailed analysis
+                    target_col = f'Target_{horizon}d'
+                    # Ensure no NaNs in features or target (indicators create early NaNs)
+                    df_clean = df_with_targets.dropna(subset=[target_col] + FEATURE_COLS)
+                    X = df_clean[FEATURE_COLS]
+                    y = df_clean[target_col]
+                    
+                    # Use same train/test split
+                    train_size = int(0.8 * len(X))
+                    X_test = X.iloc[train_size:]
+                    y_test = y.iloc[train_size:]
+                    test_index = X_test.index
+                    y_pred = cached_model.predict(X_test)
+                    
+                    # Store test predictions
+                    self.backtest_predictions[f'{horizon}d'] = {
+                        'predictions': y_pred,
+                        'actuals': y_test,
+                        'dates': test_index,
+                        'index': test_index
+                    }
+                    
+                    # Store detailed recent predictions
+                    recent_preds = y_pred[-10:]
+                    recent_actuals = y_test.iloc[-10:]
+                    recent_dates = test_index[-10:]
+                    
+                    detailed_predictions = []
+                    for date, pred, actual in zip(recent_dates, recent_preds, recent_actuals):
+                        error = abs(actual - pred)
+                        error_pct = (error / actual) * 100
+                        detailed_predictions.append({
+                            'date': date.strftime('%Y-%m-%d'),
+                            'predicted_price': float(pred),
+                            'actual_price': float(actual),
+                            'error': float(error),
+                            'error_percent': float(error_pct)
+                        })
+                    
+                    self.backtest_predictions[f'{horizon}d']['detailed'] = detailed_predictions
+                    
+                    print(f"  ✓ {horizon}-day model: MAE=${cached_metrics['MAE']:.2f}, RMSE=${cached_metrics['RMSE']:.2f}, R²={cached_metrics['R2']:.4f}")
+                    continue
+            
+            # Only reach here if cache load failed or was invalid
             
             # Train new model
             target_col = f'Target_{horizon}d'
@@ -177,18 +216,30 @@ class MultiHorizonPipeline(SingleStepPipeline):
             y = df_clean[target_col]
 
             if self.model_type == 'lstm':
-                # Sequence-aware path
-                # Fit scaler on train portion only (time-ordered)
-                train_size = int(0.8 * len(X))
-                scaler = fit_feature_scaler(X, train_end_index=train_size)
+                # Sequence-aware path with proper data leakage prevention
+                # Build sequences first, then split, then refit scaler on training portion only
+                
+                # Temporary scaler to build sequences
+                scaler = fit_feature_scaler(X, train_end_index=len(X))
                 X_scaled = apply_feature_scaler(X, scaler)
-
-                # Build sequences
                 X_seq, y_seq, meta = build_supervised_sequences(X_scaled, y, lookback=LSTM_LOOKBACK)
-                # Align split with earlier scaling (reduce by lookback)
-                adj_train_size = max(1, train_size - LSTM_LOOKBACK)
-                X_train, y_train = X_seq[:adj_train_size], y_seq[:adj_train_size]
-                X_test, y_test = X_seq[adj_train_size:], y_seq[adj_train_size:]
+                
+                # Calculate proper 80/20 split on sequences
+                sequences_train_size = int(0.8 * len(X_seq))
+                sequences_train_size = max(10, min(sequences_train_size, len(X_seq) - 10))
+                
+                # Split sequences
+                X_train, y_train = X_seq[:sequences_train_size], y_seq[:sequences_train_size]
+                X_test, y_test = X_seq[sequences_train_size:], y_seq[sequences_train_size:]
+                
+                # CRITICAL FIX: Re-fit scaler on ONLY original rows used by training sequences
+                scaler_train_end = sequences_train_size + LSTM_LOOKBACK
+                scaler = fit_feature_scaler(X, train_end_index=scaler_train_end)
+                X_scaled = apply_feature_scaler(X, scaler)
+                # Rebuild sequences with properly fitted scaler
+                X_seq, y_seq, meta = build_supervised_sequences(X_scaled, y, lookback=LSTM_LOOKBACK)
+                X_train, y_train = X_seq[:sequences_train_size], y_seq[:sequences_train_size]
+                X_test, y_test = X_seq[sequences_train_size:], y_seq[sequences_train_size:]
 
                 # Standardize target on train only to stabilize training; store stats for inverse transform
                 y_train_mean = float(np.mean(y_train))
@@ -242,9 +293,11 @@ class MultiHorizonPipeline(SingleStepPipeline):
                 self.multi_metrics[f'{horizon}d'] = metrics
                 self.multi_model.set_horizon_artifacts(horizon, weights_path=str(self._get_multihorizon_cache_path(horizon)))
 
-                # Build index alignment for backtest record
-                test_index = X.iloc[train_size:].index
-                test_index = test_index[: len(y_pred)]
+                # CRITICAL FIX: Correct index alignment for test sequences
+                # Test sequences start at sequences_train_size in sequence array
+                # This maps to original position: LSTM_LOOKBACK + sequences_train_size
+                test_start_in_original = LSTM_LOOKBACK + sequences_train_size
+                test_index = X.index[test_start_in_original:test_start_in_original + len(y_pred)]
                 self.backtest_predictions[f'{horizon}d'] = {
                     'predictions': y_pred,
                     'actuals': y.loc[test_index],  # keep as Series for downstream plotting

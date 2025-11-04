@@ -14,6 +14,10 @@ class ReportGenerator:
         self.metrics = metrics or {}
         self.sentiment_info = sentiment_info or {}
         self.predictions = predictions or {}  # For multi-horizon predictions
+        
+        # PROBLEM 3 FIX: Store feature columns for consistent inference
+        # Will be set by pipeline after training
+        self.feature_cols_used = None
     
     def generate_text_summary(self):
         """Generate enhanced text-based summary"""
@@ -95,23 +99,42 @@ class ReportGenerator:
                 summary_lines.append("\n🔮 NEXT-DAY PREDICTION (Single-Step)")
                 summary_lines.append("-"*80)
                 
-                # Get last prediction with actual
+                # CRITICAL FIX: Predicted_Close at index t is the prediction for day t+1
+                # We need to compare it with the ACTUAL close at t+1, not t
                 last_pred_idx = predictions.index[-1]
                 last_pred = predictions.iloc[-1]
-                # ALIGNMENT FIX: compare against next day's actual (t+1)
-                # The prediction at index t represents price at t+1
-                actual_price = self.df['Close'].shift(-1).loc[last_pred_idx]
-                pred_date = last_pred_idx.strftime('%Y-%m-%d')
                 
-                summary_lines.append(f"Most Recent Prediction Date: {pred_date}")
-                summary_lines.append(f"Predicted Price: ${last_pred:.2f}")
-                summary_lines.append(f"Actual Price: ${actual_price:.2f}")
-                
-                pred_error = abs(actual_price - last_pred)
-                pred_error_pct = (pred_error / actual_price) * 100
-                accuracy = "✅ Excellent" if pred_error_pct < 2 else "✓ Good" if pred_error_pct < 5 else "⚠️ Fair" if pred_error_pct < 10 else "❌ Needs Improvement"
-                summary_lines.append(f"Prediction Error: ${pred_error:.2f} ({pred_error_pct:.2f}%)")
-                summary_lines.append(f"Accuracy Rating: {accuracy}")
+                # Find the actual next-day price by looking at the next index
+                try:
+                    # Get position of last prediction in the original dataframe
+                    idx_position = self.df.index.get_loc(last_pred_idx)
+                    # Check if there's a next day (actual future data exists)
+                    if idx_position + 1 < len(self.df):
+                        next_day_idx = self.df.index[idx_position + 1]
+                        actual_price = self.df.loc[next_day_idx, 'Close']
+                        pred_date = last_pred_idx.strftime('%Y-%m-%d')
+                        actual_date = next_day_idx.strftime('%Y-%m-%d')
+                        
+                        summary_lines.append(f"Prediction Made On: {pred_date}")
+                        summary_lines.append(f"Target Date (t+1): {actual_date}")
+                        summary_lines.append(f"Predicted Price: ${last_pred:.2f}")
+                        summary_lines.append(f"Actual Price: ${actual_price:.2f}")
+                        
+                        pred_error = abs(actual_price - last_pred)
+                        pred_error_pct = (pred_error / actual_price) * 100
+                        accuracy = "✅ Excellent" if pred_error_pct < 2 else "✓ Good" if pred_error_pct < 5 else "⚠️ Fair" if pred_error_pct < 10 else "❌ Needs Improvement"
+                        summary_lines.append(f"Prediction Error: ${pred_error:.2f} ({pred_error_pct:.2f}%)")
+                        summary_lines.append(f"Accuracy Rating: {accuracy}")
+                    else:
+                        # Last prediction is for a future day that hasn't happened yet
+                        summary_lines.append(f"Latest Prediction Date: {last_pred_idx.strftime('%Y-%m-%d')}")
+                        summary_lines.append(f"Predicted Next-Day Price: ${last_pred:.2f}")
+                        summary_lines.append(f"Actual Price: Not yet available (future prediction)")
+                except Exception as e:
+                    # Fallback if index lookup fails
+                    summary_lines.append(f"Latest Prediction: ${last_pred:.2f}")
+                    summary_lines.append(f"Note: Unable to validate prediction - {str(e)}")
+
                 
                 # Prediction coverage
                 prediction_coverage = (len(predictions) / len(self.df)) * 100
@@ -126,15 +149,25 @@ class ReportGenerator:
                 if len(self.df) > 0:
                     latest_features_idx = self.df.dropna(subset=['SMA_20', 'EMA_20', 'RSI_14']).index[-1]
                     if hasattr(self, 'model') and self.model is not None:
-                        # Build feature list to match training (include small feature block if present)
-                        base_feats = ['Open', 'High', 'Low', 'Close', 'Volume', 'SMA_20', 'EMA_20',
-                                      'UPPER_BAND', 'LOWER_BAND', 'RSI_14', 'MACD', 'MACD_Signal', 'MACD_Hist', 'HMA_20', 'Sentiment_Score']
-                        extra_feats = ['Ret_1', 'Ret_5', 'Vol_5', 'Gap', 'Range']
-                        feat_list = [c for c in (base_feats + extra_feats) if c in self.df.columns]
-                        latest_features = self.df.loc[latest_features_idx, feat_list].values.reshape(1, -1)
-                        # Model predicts return; reconstruct price
-                        pred_return = self.model.predict(latest_features)[0]
-                        next_pred_price = current_price * (1 + pred_return)
+                        # PROBLEM 3 FIX: Use exact same features as training
+                        if self.feature_cols_used is not None:
+                            # Use feature columns from training (passed by pipeline)
+                            feature_cols_for_prediction = self.feature_cols_used
+                        else:
+                            # Fallback to default if not set (shouldn't happen in normal flow)
+                            from config.settings import FEATURE_COLS
+                            feature_cols_for_prediction = FEATURE_COLS + ['Ret_1', 'Ret_5', 'Vol_5', 'Gap', 'Range']
+                        
+                        # Verify all features exist before prediction
+                        missing_features = [f for f in feature_cols_for_prediction if f not in self.df.columns]
+                        if missing_features:
+                            print(f"⚠ Warning: Missing features for prediction: {missing_features}")
+                            next_pred_price = last_pred
+                        else:
+                            latest_features = self.df.loc[latest_features_idx, feature_cols_for_prediction].values.reshape(1, -1)
+                            # Model predicts return; reconstruct price
+                            pred_return = self.model.predict(latest_features)[0]
+                            next_pred_price = current_price * (1 + pred_return)
                     else:
                         next_pred_price = last_pred
                     
@@ -236,16 +269,22 @@ class ReportGenerator:
         # SINGLE-STEP WALK-FORWARD SUMMARY (time-aware over 5 splits)
         try:
             from evaluation.backtester import Backtester
-            from config.settings import FEATURE_COLS
             summary_lines.append("\n🧪 WALK-FORWARD VALIDATION (Single-Step)")
             summary_lines.append("-"*80)
+            
+            # PROBLEM 3 FIX: Use same feature list as training
+            if self.feature_cols_used is not None:
+                feature_cols_for_backtest = self.feature_cols_used
+            else:
+                # Fallback to default if not set
+                from config.settings import FEATURE_COLS
+                feature_cols_for_backtest = FEATURE_COLS + ['Ret_1', 'Ret_5', 'Vol_5', 'Gap', 'Range']
+            
             # Only drop rows missing required training columns (avoid dropping rows due to Predicted_Close etc.)
-            df_wf = self.df.dropna(subset=feat_list + ['Target']).copy()
-            # Build feature list used during training (include small feature block if present)
-            base_feats = FEATURE_COLS
-            extra_feats = ['Ret_1', 'Ret_5', 'Vol_5', 'Gap', 'Range']
-            feat_list = [c for c in (base_feats + extra_feats) if c in df_wf.columns]
-            backtester = Backtester(df_wf, getattr(self, 'model', None), feat_list)
+            required_cols = feature_cols_for_backtest + ['Target']
+            df_wf = self.df.dropna(subset=required_cols).copy()
+            
+            backtester = Backtester(df_wf, getattr(self, 'model', None), feature_cols_for_backtest)
             # Target is returns in column 'Target' after recent changes
             backtester.target_col = 'Target'
             avg_metrics = backtester.walk_forward_validation(n_splits=5, horizon=1)

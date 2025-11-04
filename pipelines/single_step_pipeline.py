@@ -36,6 +36,10 @@ class SingleStepPipeline:
         self.model = None
         self.metrics = {}
         self.sentiment_info = {}
+        
+        # PROBLEM 3 FIX: Store feature columns used for training to ensure consistency
+        # This will be set during training and used during inference/reporting
+        self.feature_cols_used = None
     
     def download_data(self, period=DEFAULT_PERIOD):
         """Step 1: Download stock data"""
@@ -46,6 +50,16 @@ class SingleStepPipeline:
         """Step 2: Calculate technical indicators"""
         print("Calculating technical indicators...")
         self.df = TechnicalIndicators.add_all_indicators(self.df)
+        
+        # Add time-series features IMMEDIATELY after base indicators
+        # These are lagged/backward-looking features, safe to calculate on full dataset
+        # BUT must be done BEFORE target creation to maintain proper index alignment
+        self.df['Ret_1'] = self.df['Close'].pct_change(1)
+        self.df['Ret_5'] = self.df['Close'].pct_change(5)
+        self.df['Vol_5'] = self.df['Ret_1'].rolling(5).std()
+        self.df['Gap'] = (self.df['Open'] - self.df['Close'].shift(1)) / self.df['Close'].shift(1)
+        self.df['Range'] = (self.df['High'] - self.df['Low']) / self.df['Close']
+        
         print("✓ Indicators calculated successfully")
     
     def analyze_sentiment(self):
@@ -62,52 +76,77 @@ class SingleStepPipeline:
     def train_model(self, model_type='xgboost', use_grid_search=True):
         """Step 4: Train prediction model"""
         
+        # Define feature columns first (needed for cache validation)
+        feature_cols_local = FEATURE_COLS + ['Ret_1', 'Ret_5', 'Vol_5', 'Gap', 'Range']
+        
         # Check cache
         import hashlib
         data_hash = hashlib.md5(pd.util.hash_pandas_object(self.df, index=True).values).hexdigest()
         cached_model = self.cache_manager.load_model(self.ticker, model_type)
         
-        if not self.force_refresh and self.cache_manager.is_cache_valid(cached_model, data_hash):
+        # PROBLEM 4 FIX: Validate cache with model type and feature columns
+        if not self.force_refresh and self.cache_manager.is_cache_valid(
+            cached_model, data_hash, model_type=model_type, feature_cols=feature_cols_local
+        ):
             print(f"✓ Loaded cached model for {self.ticker}")
             self.model = cached_model['model']
             self.metrics = cached_model['metrics']
+            # PROBLEM 3 FIX: Restore feature columns from cache
+            self.feature_cols_used = cached_model.get('feature_cols', feature_cols_local)
             return
         
         # Prepare data
         print(f"Training {model_type} model...")
 
-        # TARGETS
-        if model_type == 'lstm':
-            # Predict next-day closing price directly for LSTM
-            self.df['Target'] = self.df['Close'].shift(-1)
-        else:
-            # r_{t+1} = (Close_{t+1} - Close_t) / Close_t
-            self.df['Target'] = (self.df['Close'].shift(-1) - self.df['Close']) / self.df['Close']
+        # CREATE TARGET - done AFTER features are calculated in calculate_indicators()
+        # This ensures proper index alignment and prevents feature recalculation
+        # CRITICAL FIX #3: All models now predict RETURNS for consistency
+        # r_{t+1} = (Close_{t+1} - Close_t) / Close_t
+        self.df['Target'] = (self.df['Close'].shift(-1) - self.df['Close']) / self.df['Close']
 
-        # MINIMAL FEATURE BLOCK: add a few robust, time-series friendly features
-        # - Lagged returns, rolling volatility, overnight gap, intraday range
-        self.df['Ret_1'] = self.df['Close'].pct_change(1)
-        self.df['Ret_5'] = self.df['Close'].pct_change(5)
-        self.df['Vol_5'] = self.df['Ret_1'].rolling(5).std()
-        self.df['Gap'] = (self.df['Open'] - self.df['Close'].shift(1)) / self.df['Close'].shift(1)
-        self.df['Range'] = (self.df['High'] - self.df['Low']) / self.df['Close']
-
+        # Clean data - drops rows with NaN in ANY column
+        # This includes early rows (indicators need warmup) and last row (target is NaN)
         df_clean = self.df.dropna()
 
-        # Use existing FEATURE_COLS + the small feature block (local-only, no global setting change)
+        # Feature columns include base indicators + time-series features
+        # These were ALL calculated in calculate_indicators() to avoid data leakage
         feature_cols_local = FEATURE_COLS + ['Ret_1', 'Ret_5', 'Vol_5', 'Gap', 'Range']
+        
+        # PROBLEM 3 FIX: Store feature columns for consistent use in inference
+        self.feature_cols_used = feature_cols_local
+        
         X = df_clean[feature_cols_local]
         y = df_clean['Target']
         
         if model_type == 'lstm':
             # LSTM path (sequence-aware)
-            train_size = int(0.8 * len(X))
-            scaler = fit_feature_scaler(X, train_end_index=train_size)
+            # First scale full data, then build sequences, then split properly
+            # This prevents data leakage in scaler
+            
+            # Build sequences from scaled features FIRST (before split)
+            scaler = fit_feature_scaler(X, train_end_index=len(X))  # Temporary scaler on all data
             X_scaled = apply_feature_scaler(X, scaler)
             X_seq, y_seq, _ = build_supervised_sequences(X_scaled, y, lookback=LSTM_LOOKBACK)
-            adj_train_size = max(1, train_size - LSTM_LOOKBACK)
-            X_train, y_train = X_seq[:adj_train_size], y_seq[:adj_train_size]
-            X_test, y_test = X_seq[adj_train_size:], y_seq[adj_train_size:]
+            
+            # Now calculate proper 80/20 split on SEQUENCES
+            sequences_train_size = int(0.8 * len(X_seq))
+            sequences_train_size = max(10, min(sequences_train_size, len(X_seq) - 10))  # Ensure both splits have data
+            
+            # Split sequences
+            X_train, y_train = X_seq[:sequences_train_size], y_seq[:sequences_train_size]
+            X_test, y_test = X_seq[sequences_train_size:], y_seq[sequences_train_size:]
+            
+            # CRITICAL FIX: Re-fit scaler on ONLY the original rows used by training sequences
+            # Training sequences 0 to sequences_train_size-1 use original rows 0 to sequences_train_size+LSTM_LOOKBACK-1
+            scaler_train_end = sequences_train_size + LSTM_LOOKBACK
+            scaler = fit_feature_scaler(X, train_end_index=scaler_train_end)
+            X_scaled = apply_feature_scaler(X, scaler)
+            # Rebuild sequences with properly fitted scaler
+            X_seq, y_seq, _ = build_supervised_sequences(X_scaled, y, lookback=LSTM_LOOKBACK)
+            X_train, y_train = X_seq[:sequences_train_size], y_seq[:sequences_train_size]
+            X_test, y_test = X_seq[sequences_train_size:], y_seq[sequences_train_size:]
+            
+            print(f"LSTM sequences - Train: {len(X_train)} | Test: {len(X_test)} (lookback={LSTM_LOOKBACK})")
 
             # Standardize target (train only), then inverse for predictions
             y_train_mean = float(np.mean(y_train))
@@ -134,16 +173,26 @@ class SingleStepPipeline:
             lstm_trainer = LSTMTrainer(cfg)
             lstm_trainer.fit(Xt, yt, X_val=None, y_val=None)
             yp, _, _ = lstm_trainer.predict(Xtt)
-            y_pred = (yp.numpy() * y_train_std) + y_train_mean
+            y_pred_return = (yp.numpy() * y_train_std) + y_train_mean
 
-            # Align test index and write predictions
-            test_index = X.index[train_size:][: len(y_pred)]
-            self.df.loc[test_index, 'Predicted_Close'] = y_pred
+            # CRITICAL FIX #2: Correct index alignment
+            # Sequences are built from rows LSTM_LOOKBACK onwards in df_clean
+            # Test sequences start at sequences_train_size in the sequence array
+            # This maps to original df_clean position: LSTM_LOOKBACK + sequences_train_size
+            test_start_in_original = LSTM_LOOKBACK + sequences_train_size
+            test_index = X.index[test_start_in_original:test_start_in_original + len(y_pred_return)]
+            
+            # CRITICAL FIX #3: Convert predicted returns to prices
+            # Model now predicts returns, convert to price: P_{t+1} = P_t * (1 + r_{t+1})
+            pred_close = self.df.loc[test_index, 'Close'] * (1 + y_pred_return)
+            
+            # CRITICAL: Store prediction at index t, which represents predicted price for day t+1
+            self.df.loc[test_index, 'Predicted_Close'] = pred_close
 
-            # Compute simple metrics vs true next-day Close on test_index
+            # Compute metrics on returns (consistent with other models)
             from evaluation.metrics import MetricsCalculator
             y_true = y.loc[test_index].values
-            self.metrics = MetricsCalculator.calculate_all(y_true, y_pred)
+            self.metrics = MetricsCalculator.calculate_all(y_true, y_pred_return)
             self.model = None  # LSTM model handled separately; not used by report
         else:
             # Sklearn/XGBoost path
@@ -153,12 +202,19 @@ class SingleStepPipeline:
             self.model, self.metrics, test_index, y_pred = trainer.train(X, y, param_grid)
 
             # RECONSTRUCT NEXT-DAY PRICE from predicted return and today's Close
+            # Model predicts r_{t+1}, we convert to price: P_{t+1} = P_t * (1 + r_{t+1})
             pred_close = self.df.loc[test_index, 'Close'] * (1 + y_pred)
-            # Store next-day price prediction at index t
+            
+            # CRITICAL: Store prediction at index t, which represents predicted price for t+1
+            # This means: df.loc[t, 'Predicted_Close'] = predicted price for day t+1
+            # To validate, compare with df.loc[t+1, 'Close'] (actual price at t+1)
             self.df.loc[test_index, 'Predicted_Close'] = pred_close
         
-        # Cache model
-        self.cache_manager.save_model(self.ticker, self.model, self.metrics, data_hash, model_type)
+        # PROBLEM 4 FIX: Cache model with feature columns for validation
+        self.cache_manager.save_model(
+            self.ticker, self.model, self.metrics, data_hash, 
+            model_type=model_type, feature_cols=self.feature_cols_used
+        )
 
         # Print metrics if available from tree-based trainer
         if model_type != 'lstm':
@@ -200,6 +256,8 @@ class SingleStepPipeline:
         )
         # Pass trained model so report can forecast using returns and build walk-forward summary
         reporter.model = self.model
+        # PROBLEM 3 FIX: Pass feature columns to ensure inference uses same features as training
+        reporter.feature_cols_used = self.feature_cols_used
         reporter.generate_all()
     
     def run(self, model_type='xgboost', skip_plots=False):
