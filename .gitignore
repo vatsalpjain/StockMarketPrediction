@@ -20,7 +20,6 @@ venv.bak/
 *.ipynb_checkpoints
 
 # Environment variables
-.env
 .env.local
 .env.*.local
 
@@ -175,7 +174,7 @@ dmypy.json
 cython_debug/
 
 # API Keys (extra safety)
-*api_key*
+api_key
 *secret*
 config_local.py
 credentials.json
